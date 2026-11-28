@@ -31,6 +31,6 @@ The executor also registers six **hard-wired classes** it needs itself (`FlowIns
 - [perspectives/perspective_instance/shapes.rs](../../../rust-executor/src/perspectives/perspective_instance/shapes.rs): `register_shapes`, `register_shape_json`, `shapes`, `class_names`, `class_keys`, `shape_registry`, `RegisterResult`, `ShapeSummary`.
 - [perspectives/hardwired_class.rs](../../../rust-executor/src/perspectives/hardwired_class.rs) and [perspectives/hardwired_sdna/](../../../rust-executor/src/perspectives/hardwired_sdna): `ensure_subject_classes`, `ensure_before_write`, `HardwiredClass`, the hard-wired classes.
 - SDK: [core/src/shacl/](../../../core/src/shacl) (`SHACLShape`, `SHACLFlow`), [core/src/model/](../../../core/src/model) (decorators, `shacl-gen.ts`), `addFlow` in [PerspectiveProxy.ts](../../../core/src/perspectives/PerspectiveProxy.ts).
-- Docs: [SHACL_SDNA_ARCHITECTURE.md](../../../SHACL_SDNA_ARCHITECTURE.md), [docs-src/pages/social-dna.mdx](../../../docs-src/pages/social-dna.mdx).
+- Docs: [docs-src/pages/social-dna.mdx](../../../docs-src/pages/social-dna.mdx).
 
 </details>

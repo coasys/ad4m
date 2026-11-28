@@ -30,6 +30,9 @@ Live queries (`perspective.subscribe`) are SPARQL or model queries and do
 not use Prolog; a Prolog live query gets a 400. The filtered sub-pools were built
 for Prolog live queries and are now only reached through `run_query_smart`
 (`is_subscription = false` uses existing filtered pools, never creates one).
+`run_query_smart` sends a subject class query to the SDNA pool (`should_handle_query`) once
+the complete pool holds data, a query on a perspective above `FILTERING_THRESHOLD` to a
+filtered pool, and every other query to the complete pool.
 
 Fact generators live in `perspectives/sdna.rs` (`get_data_facts`, `get_sdna_facts`,
 `get_static_infrastructure_facts`) and `perspectives/shacl_to_prolog.rs` (SHACL →

@@ -52,6 +52,12 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   after its write (`register_shapes`, `import_perspective`, the publish path); a reload that
   rebuilds the store clears too. So an IRI key and a name key never hold a stale or crossed shape.
   `get_shape(class)` → `Arc<ModelShape>`, `class` a target class IRI or a name.
+- An action link (`ad4m://constructor` and `ad4m://destructor` on the shape, `ad4m://setter`,
+  `ad4m://adder` and `ad4m://remover` on a property shape) targets a literal that holds a JSON
+  array of `Command` (`perspective_instance.rs`, read by `parse_actions_from_literal`):
+  `action` (`addLink`, `removeLink`, `setSingleTarget`, `collectionSetter`), `source`,
+  `predicate`, `target`, optional `local`. `execute_commands` puts the instance address in
+  place of `this` and each parameter's value in place of its name (`value`).
 - `register_shapes` compares the own links a shape gives with the own links stored, as
   triples. Equal sets write nothing (`unchanged`); otherwise one Shared diff adds what is
   missing and removes every copy of each stale own link. Copies of an expected triple stay
