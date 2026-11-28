@@ -282,6 +282,12 @@ impl LanguageController {
             language_address.clone(),
         );
 
+        if is_system_language {
+            // Its Holochain calls stay on the main agent's cells whoever makes them (#1775).
+            crate::holochain_service::user_cells::UserCells::global()
+                .mark_system_language(&language_address);
+        }
+
         // Spawn dedicated runtime in its own thread (sandboxed to storage_directory)
         let starting = span(format!("loadLanguage.runtimeStart {}", language_address));
         let runtime_handle = LanguageRuntimeHandle::spawn(
@@ -1842,6 +1848,7 @@ impl LanguageController {
         // per-language runtime registered" debug branch instead — quieter
         // and honest about the state of the system.
         crate::js_core::languages_extension::drop_holochain_signal_handlers_for_language(address);
+        crate::holochain_service::user_cells::UserCells::global().forget_language(address);
 
         // Teardown the per-language Rust runtime (if loaded there).
         // Errors here (e.g. runtime not loaded, teardown failure) must not abort
@@ -3069,11 +3076,13 @@ impl LanguageController {
         })
     }
 
-    /// Execute an interaction on an expression.
+    /// Execute an interaction on an expression, as `agent` (the caller): the language runs it
+    /// for that agent, so its `agentDid()` and its Holochain calls are the caller's (#1775).
     pub async fn expression_interact(
         &self,
         url: &str,
         call: &InteractionCall,
+        agent: &AgentContext,
     ) -> Result<Option<String>, LanguageError> {
         let (lang_address, expression_address) = Self::parse_expr_url(url)?;
 
@@ -3167,7 +3176,9 @@ impl LanguageController {
             escaped_name,
         );
 
-        let result = self.execute_on_language(&lang_address, &script).await?;
+        let result = self
+            .call_language(&lang_address, &script, agent.clone(), CallKind::Ordered)
+            .await?;
 
         let trimmed = result.trim();
         if trimmed == "null" || trimmed == "undefined" {
