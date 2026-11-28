@@ -15,6 +15,52 @@ use super::{holochain_service_once_started, HolochainServiceInterface};
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
 use crate::js_core::languages_extension::try_with_isolate_state;
+use crate::{
+    agent::AgentContext,
+    holochain_service::user_cells::{ConductorBackend, UserCells},
+    js_core::agent_extension::CallAgent,
+};
+
+/// The agent a `HOLOCHAIN_SERVICE` op acts as: the agent of the call the JS runs for
+/// (`__ad4mCallAgent()`, #1861's call token). With no token the op refuses, as the `AGENT` ops
+/// do: code that clears its async context during a managed user's call must not reach the main
+/// agent's cell, or another user's app id. Every host entry into a language (bootstrap, `init`
+/// and its `registerDNAs`, callback registration, a Holochain signal, a sync) runs with a
+/// main-agent token, so no host path needs a default.
+fn agent_of(call: Option<&CallAgent>) -> Result<AgentContext, AnyhowWrapperError> {
+    call.map(|call| call.agent().clone()).ok_or_else(|| {
+        AnyhowWrapperError::from(anyhow!(
+            "No agent: this code runs outside any call into the language, so it may not use \
+             Holochain"
+        ))
+    })
+}
+
+/// The language this isolate runs, if it runs one.
+fn own_language() -> Option<String> {
+    try_with_isolate_state(|state| state.language_address.clone()).flatten()
+}
+
+/// The app id a call of `agent` to `app_id` goes to: `app_id` for the main agent, the user's
+/// own copy for a managed user (installed on first use; see `user_cells`).
+async fn app_for_call(
+    interface: &HolochainServiceInterface,
+    app_id: &str,
+    language: Option<&str>,
+    agent: &AgentContext,
+) -> Result<String, AnyError> {
+    if agent.is_main_agent() {
+        return Ok(app_id.to_string());
+    }
+    UserCells::global()
+        .app_for_call(
+            &ConductorBackend(interface.clone()),
+            app_id,
+            language,
+            agent,
+        )
+        .await
+}
 
 /// Convert an rmpv::Value (full-fidelity msgpack) to serde_json::Value.
 /// Binary data is represented as a JSON object `{"__binary": [byte, byte, ...]}` so
@@ -230,29 +276,86 @@ async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     }
 }
 
+/// Installs an app. As the main agent (a language's `registerDNAs` during its `init`), as
+/// before, and the payload is remembered for the language's users (#1775): a managed user's
+/// first call to the app installs the same payload under the user's own key. As a managed
+/// user, the language's payload never reaches the conductor: the answer is the user's own app,
+/// installed by Rust's per-user installer under the user's key. User app ids (`<app>@<did>`)
+/// are reserved to that installer.
 #[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn install_app(
     #[serde] install_app_payload: InstallAppPayload,
+    #[cppgc] call: Option<&CallAgent>,
 ) -> Result<AppInfo, AnyhowWrapperError> {
+    let agent = agent_of(call)?;
+    let language = own_language();
+    let app_id = install_app_payload.installed_app_id.clone();
+    if let Some(app_id) = app_id.as_deref().filter(|id| id.contains('@')) {
+        return Err(AnyhowWrapperError::from(anyhow!(
+            "installApp: app id {app_id} contains '@', which is reserved to the users' own apps"
+        )));
+    }
     let interface = holochain_service_once_started()
         .await
         .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(
+    if !agent.is_main_agent() {
+        let app_id = app_id.ok_or_else(|| {
+            AnyhowWrapperError::from(anyhow!("installApp needs an installed_app_id"))
+        })?;
+        let user_app = app_for_call(&interface, &app_id, language.as_deref(), &agent).await?;
+        return interface
+            .get_app_info(user_app.clone())
+            .await?
+            .ok_or_else(|| AnyhowWrapperError::from(anyhow!("app {user_app} is not installed")));
+    }
+    // Remembered before the install: after a restart the app is installed already and the
+    // install below fails, but the language's users still need the payload. Only an app id
+    // of the language's own (`<address>-<nick>`), so one language cannot take over the
+    // routing of another's app.
+    if let (Some(language), Some(app_id)) = (&language, &app_id) {
+        if app_id.starts_with(&format!("{language}-")) {
+            UserCells::global().remember_main_app(app_id, language, install_app_payload.clone());
+        }
+    }
+    let installed = timeout(
         APP_INSTALL_TIMEOUT_DURATION,
         interface.install_app(install_app_payload),
     )
     .await
-    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-    .map_err(AnyhowWrapperError::from)
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")));
+    if let Some(app_id) = &app_id {
+        UserCells::global()
+            .restore_user_routes(&ConductorBackend(interface.clone()), app_id)
+            .await;
+    }
+    installed?.map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async(lazy), fast)]
+/// The app info of `app_id` as the calling agent sees it: the main agent's app for the main
+/// agent, the user's own copy for a managed user (installed on first use, #1775).
+// nofast: a fast op cannot keep the call token borrowed across its awaits.
+#[op2(async(lazy), nofast)]
 #[serde]
-async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
+async fn get_app_info(
+    #[string] app_id: String,
+    #[cppgc] call: Option<&CallAgent>,
+) -> Result<Option<AppInfo>, AnyhowWrapperError> {
+    let agent = agent_of(call)?;
+    let language = own_language();
     let interface = holochain_service_once_started()
         .await
         .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
+    // A user asking about an app no language registered (`registerDNAs` probing for an
+    // install, when it runs during a user's call) sees no app: never the main agent's.
+    let cells = UserCells::global();
+    let system = language
+        .as_deref()
+        .is_some_and(|language| cells.is_system_language(language));
+    if !agent.is_main_agent() && !system && !cells.is_registered(&app_id) {
+        return Ok(None);
+    }
+    let app_id = app_for_call(&interface, &app_id, language.as_deref(), &agent).await?;
     timeout(TIMEOUT_DURATION, interface.get_app_info(app_id))
         .await
         .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
@@ -298,7 +401,11 @@ async fn call_zome_function(
     #[string] zome_name: String,
     #[string] fn_name: String,
     #[serde] payload: Option<serde_json::Value>,
+    #[cppgc] call: Option<&CallAgent>,
 ) -> Result<DecodedZomeCallResponse, AnyhowWrapperError> {
+    // The caller's cell (#1775): taken before any await, the token is borrowed from JS.
+    let agent = agent_of(call)?;
+    let language = own_language();
     // Convert the JSON value to ExternIO (msgpack-encoded bytes) that Holochain expects.
     // We use json_to_msgpack_value to properly reconvert __binary markers and byte arrays
     // back to msgpack Binary type, preserving round-trip fidelity for Holochain hashes etc.
@@ -313,8 +420,15 @@ async fn call_zome_function(
         }
         None => None,
     };
+    // One lookup for routing and the call: a second lookup could find a conductor that
+    // started in between and dispatch an app id `app_for_call` never resolved.
+    let interface = holochain_service_once_started().await;
+    let app_id = match &interface {
+        Some(interface) => app_for_call(interface, &app_id, language.as_deref(), &agent).await?,
+        None => app_id,
+    };
     let response = call_zome_within(
-        holochain_service_once_started(),
+        std::future::ready(interface),
         TIMEOUT_DURATION,
         app_id,
         cell_name,

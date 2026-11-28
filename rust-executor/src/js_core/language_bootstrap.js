@@ -168,7 +168,16 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
         signal.payload = convertBinaryMarkers(signal.payload);
     }
     const key = cellIdKey(signal.cell_id);
-    const callback = globalThis.__holochainSignalCallbacks__.get(key);
+    let callback = globalThis.__holochainSignalCallbacks__.get(key);
+    if (!callback) {
+        // A managed user's own cell of the DNA (#1775) has no callback of its
+        // own: the one registered for the DNA's main cell serves it. The host
+        // routed the signal to this language and runs it as that user.
+        const dna = key.split(":")[0] + ":";
+        for (const [k, cb] of globalThis.__holochainSignalCallbacks__) {
+            if (k.startsWith(dna)) { callback = cb; break; }
+        }
+    }
     if (callback) {
         try {
             await callback(signal);
@@ -280,13 +289,26 @@ function createHolochainDelegate(languageAddress) {
                 if (appInfo.installed_app_id && appInfo.installed_app_id !== appId) {
                     console.warn(`[registerDNAs] ${appId} reuses existing app ${appInfo.installed_app_id} (same DNA+agent cell)`);
                 }
-                appIdByNick.set(dna.nick, appInfo.installed_app_id || appId);
+                // Registered during a managed user's call, installApp answers the
+                // user's own app (`<appId>@<did>`, #1775); the delegate keeps the
+                // main app id: the host maps it to the caller's app on every call.
+                const installedId = appInfo.installed_app_id || appId;
+                appIdByNick.set(dna.nick,
+                    installedId.startsWith(`${appId}@`) ? appId : installedId);
                 results.push(appInfo);
 
                 // Wire the signalCallback to every cell_id in this app
                 registerSignalCallbacksForApp(appInfo, signalCallback, languageAddress);
             }
             return results;
+        },
+
+        // The AppInfo of the caller's own app for `dnaNick`: the main agent's
+        // for the main agent, the managed user's own (installed on its first
+        // use, #1775) for a user. Its agent_pub_key is the caller's Holochain
+        // agent in this language.
+        async appInfo(dnaNick) {
+            return await HOLOCHAIN_SERVICE.getAppInfo(appIdFor(dnaNick));
         },
 
         async call(dnaNick, zomeName, fnName, params) {
