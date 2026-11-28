@@ -43,6 +43,6 @@ export const e19TabOpensSpace = e2eScenario({
       await call.close("u1:tab2");
     });
     await step("the call carries on for 10 s more", () => call.holds(steady(), 10_000, "call after the second tab closed"));
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

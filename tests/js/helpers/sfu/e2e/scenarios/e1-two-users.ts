@@ -52,6 +52,6 @@ export const e1TwoUsers = e2eScenario({
       await call.leave("ben");
       await call.eventually(call.rosterIsEveryone(), 15_000, "roster after ben left");
     });
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

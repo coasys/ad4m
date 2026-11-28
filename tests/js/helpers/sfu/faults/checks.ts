@@ -15,15 +15,20 @@
  *    and `framesGrow` (audio and video frame counters grown over the last
  *    second, both measured after the window), within `RUN_RECOVER_MS`. An
  *    `uninterrupted` window asks the same of every sample inside it. Who is
- *    judged follows the call: a participant who joins mid-run is judged from
- *    the samples that hold them;
+ *    judged follows the call: a pair with a participant who
+ *    joins inside a window is judged from the first sample in which that
+ *    pair itself carried media, and after the window like everyone else;
  *  - departures stay under `MAX_DEPARTURES`: `departures` counts the
  *    `participant-left` events a session fired, so its growth over the run
  *    is how many peers visibly left (a rebuild fires one per roster member).
  *
- * A sample that failed is missing evidence, never a pass. A sample is stamped
- * when its snapshots came back, so a slow collection never passes for an
- * early one. `stop()` keeps sampling until every ended window shows its
+ * A sample that failed is missing evidence, never a pass. A sample records
+ * when its collection started (`from`) and when its snapshots came back (`t`):
+ * participants answer in parallel, so the batch holds observations anywhere
+ * between the two. A baseline for recovery must have started at or after the
+ * window's end, and one for growth must have come back GROWTH_MS before the
+ * current collection started, so every counter pair spans at least
+ * GROWTH_MS. `stop()` keeps sampling until every ended window shows its
  * recovery (or its bound has passed), then judges. `abort()` stops at once
  * without judging: a row calls it in `finally`, so a failed step ends the
  * sampling too.
@@ -35,7 +40,7 @@
 import { all, type Call } from "../e2e/call.js";
 import type { Participant } from "../e2e/participant.js";
 import type { Snapshot } from "../e2e/protocol.js";
-import { sleep, within } from "../e2e/time.js";
+import { POLL_MS, sleep, within } from "../e2e/time.js";
 import { GROWTH_MS, MAX_DEPARTURES, PROBE_MS, RUN_RECOVER_MS, SAMPLE_MS } from "./timing.js";
 import type { WsShaper } from "./wsproxy.js";
 
@@ -55,6 +60,8 @@ export interface FaultWindow {
 }
 
 interface Sample {
+  /** ms epoch when the collection started. */
+  from: number;
   /** ms epoch when the snapshots came back. */
   t: number;
   /** null: the snapshot failed, so this moment has no evidence. */
@@ -77,9 +84,10 @@ export class RunChecks {
 
   /** Start sampling. Call once everyone is joined and media flows. */
   async start(): Promise<void> {
+    const from = Date.now();
     const snaps = await this.call.snapshots();
     for (const [name, snap] of snaps) this.departuresAtStart.set(name, snap.departures);
-    this.samples.push({ t: Date.now(), snaps });
+    this.samples.push({ from, t: Date.now(), snaps });
     const tick = () => {
       this.timer = null;
       if (this.stopped) return;
@@ -91,13 +99,14 @@ export class RunChecks {
     this.timer = setTimeout(tick, SAMPLE_MS);
   }
 
-  /** Take one sample, stamped when its snapshots are in. */
+  /** Take one sample, stamped when its collection started and when its snapshots are in. */
   private async take(): Promise<Sample> {
+    const from = Date.now();
     try {
       const snaps = await this.call.snapshots();
-      return { t: Date.now(), snaps };
+      return { from, t: Date.now(), snaps };
     } catch (error) {
-      return { t: Date.now(), snaps: null, error: error instanceof Error ? error.message : String(error) };
+      return { from, t: Date.now(), snaps: null, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -153,6 +162,7 @@ export class RunChecks {
     }
     const ended = this.windows.filter((w) => w.endAt !== null);
     const deadline = Math.max(0, ...ended.map((w) => w.endAt! + RUN_RECOVER_MS));
+    // Only the sampler adds evidence, once per SAMPLE_MS: looking again sooner finds the same samples.
     while (Date.now() < deadline && ended.some((w) => !this.recovery(w).recovered)) await sleep(SAMPLE_MS);
     await this.halt();
     this.samples.push(await this.take());
@@ -164,14 +174,14 @@ export class RunChecks {
   }
 
   /**
-   * What is wrong with media at `s`, against the latest good sample at least GROWTH_MS older and not before `since`; null: no such sample yet.
+   * What is wrong with media at `s`, against the latest good sample that came back GROWTH_MS before `s` started its collection and started at or after `since`; null: no such sample yet.
    * Who is judged: the participants `s` holds that `only` allows (all of them when `only` is absent).
    */
   private mediaProblems(good: GoodSample[], s: GoodSample, since: number, only?: Set<string>): string[] | null {
-    const base = [...good].reverse().find((b) => b.t <= s.t - GROWTH_MS && b.t >= since);
+    const base = [...good].reverse().find((b) => b.t <= s.from - GROWTH_MS && b.from >= since);
     if (!base) return null;
     const among = [...s.snaps.keys()].filter((name) => !only || only.has(name));
-    return all(this.call.hearsEveryone(among), this.call.seesEveryone(undefined, among), this.call.framesGrow(base.snaps, s.t - base.t, among))(s.snaps, true);
+    return all(this.call.hearsEveryone(among), this.call.seesEveryone(undefined, among), this.call.framesGrow(base.snaps, s.from - base.t, among))(s.snaps, true);
   }
 
   /** The first sample after `w` ended with media fresh on every pair, measured after the end; else the last problems seen. */
@@ -229,13 +239,27 @@ export class RunChecks {
       const endAt = w.endAt;
       const what = `${w.kind} on ${w.users.join("+")}`;
       if (w.uninterrupted) {
-        // Inside the window, only those already in the call when it began owe media: a joiner's tracks start with the join.
-        const inCall = new Set([...good].reverse().find((s) => s.t <= w.start)?.snaps.keys() ?? []);
+        // Inside the window, a pair of participants already in the call when it began owes media, both ways, from
+        // the start. A pair with a joiner owes it from the first sample in which that pair itself carried media both ways:
+        // from then on a stall on it is a violation, whatever the joiner's other pairs do. Until then the pair is
+        // judged by the recovery after the window.
+        const owing = new Set([...good].reverse().find((s) => s.t <= w.start)?.snaps.keys() ?? []);
+        const ready = new Set<string>();
         const missing = this.samples.find((s) => s.snaps === null && s.t >= w.start && s.t <= endAt);
         if (missing) violations.push(`no snapshot at t+${missing.t - w.start}ms into ${what} (${missing.error}): no evidence media flowed`);
         let judged = 0;
         for (const s of good.filter((s) => s.t >= w.start && s.t <= endAt)) {
-          const problems = this.mediaProblems(good, s, 0, inCall);
+          let problems: string[] | null = null;
+          const names = [...s.snaps.keys()];
+          for (const [i, a] of names.entries()) {
+            for (const b of names.slice(i + 1)) {
+              const found = this.mediaProblems(good, s, 0, new Set([a, b]));
+              if (!found) continue;
+              const key = [a, b].sort().join("|");
+              if (found.length === 0 || (owing.has(a) && owing.has(b))) ready.add(key);
+              if (ready.has(key)) (problems ??= []).push(...found);
+            }
+          }
           if (problems === null) continue;
           judged++;
           if (problems.length) {
@@ -283,7 +307,7 @@ export async function reconnected(shaper: WsShaper, participant: Participant, be
         last = error instanceof Error ? error.message : String(error);
       }
     }
-    await sleep(250);
+    await sleep(POLL_MS);
   }
   throw new Error(`${participant.name}'s socket did not come back within ${boundMs}ms: ${last}`);
 }

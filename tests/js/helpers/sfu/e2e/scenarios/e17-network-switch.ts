@@ -66,7 +66,7 @@ export const e17NetworkSwitch = e2eScenario({
         if (rebuilds !== 0) throw new Error(`u2's call was rebuilt ${rebuilds} time(s)`);
       });
 
-      await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+      await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
     } finally {
       await net.release();
     }

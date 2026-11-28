@@ -20,12 +20,15 @@
  *  - an `sfu.callResume` reply on it that lists her (`listed: true`) and
  *    carries the room's roster, crossing the proxy inside the bound;
  *  - carol and dave listing, hearing and seeing each other, which only that
- *    reply's state can have brought.
+ *    reply's state can have brought;
+ *  - carol's and dave's audio and video frames growing in both directions
+ *    over a baseline taken after that, still inside the same bound (a pair
+ *    without baseline counters fails).
  * Nobody may be marked left, and the three first participants' media must
  * flow throughout.
  */
 
-import { all } from "../call.js";
+import { all, type Check } from "../call.js";
 import { CAMERA } from "../media.js";
 import { e2eScenario } from "../scenario.js";
 import { within } from "../time.js";
@@ -87,7 +90,8 @@ export const e30MissedState = e2eScenario({
       await step("carol's socket is back and answers", () => reconnected(proxy, call.who("carol"), cut, RESUME_MS));
 
       await step(`a sfu.callResume reply that lists carol and carries the roster reaches her within ${RESUME_MS / 1000} s`, async () => {
-        const observed = await within(
+        // A reply already seen is judged by its own crossing time below, even when the reconnect step used up the budget.
+        const observed = resumed.seen[0] ?? await within(
           left(),
           resumed.first,
           `no sfu.callResume reply reached carol within ${RESUME_MS}ms of her socket coming back (state events eaten: ${suppressed()})`,
@@ -109,6 +113,20 @@ export const e30MissedState = e2eScenario({
         } catch (error) {
           throw new Error(`${error instanceof Error ? error.message : error} (state events eaten: ${suppressed()})`);
         }
+      });
+
+      await step(`carol's and dave's audio and video frames grow both ways within ${RESUME_MS / 1000} s of the link coming back`, async () => {
+        const remaining = left();
+        if (remaining <= 0) throw new Error(`frames: the ${RESUME_MS}ms bound from the link coming back had passed`);
+        const baseline = await call.snapshots();
+        const since = Date.now();
+        const pairs = [["carol", "dave"], ["dave", "carol"]] as const;
+        // A pair with no counters in the baseline is a failure here: framesGrow would skip it.
+        const baselined: Check = () => pairs
+          .filter(([me, other]) => !baseline.get(me)?.remotes[call.who(other).did])
+          .map(([me, other]) => `${me} had no frame counters for ${other} in the baseline`);
+        const grow: Check = (snaps, holding) => call.framesGrow(baseline, Date.now() - since, ["carol", "dave"])(snaps, holding);
+        await call.eventually(all(baselined, grow, call.hearsEveryone(["carol", "dave"]), call.seesEveryone(CAMERA, ["carol", "dave"])), left(), "frames");
         fault.end();
       });
 
@@ -118,7 +136,7 @@ export const e30MissedState = e2eScenario({
         const violations = await checks!.stop();
         if (violations.length) throw new Error(violations.join("\n"));
       });
-      await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+      await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
     } finally {
       suppression?.stop();
       await checks?.abort();

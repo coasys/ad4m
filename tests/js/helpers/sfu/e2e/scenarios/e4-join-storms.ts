@@ -47,6 +47,6 @@ export const e4JoinStorms = e2eScenario({
       await call.rejoin("u7");
       await settled("after u7's rejoin");
     });
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

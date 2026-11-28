@@ -41,11 +41,22 @@ export const PROBE_MS = 5_000;
 
 // ── RunChecks ────────────────────────────────────────────────────────────
 
-/** Snapshot cadence. */
+/**
+ * The sampler's cadence. It is evidence gathering, not a readiness wait: a
+ * sample is one snapshot RPC per participant, and the cadence is the
+ * resolution of every judgement (a recovery is timed to within one sample
+ * against RUN_RECOVER_MS, 40 samples). Two samples span GROWTH_MS, so every
+ * second sample has a growth baseline.
+ */
 export const SAMPLE_MS = 500;
-/** Frame counters must grow over this span to count as media flowing now. */
+/**
+ * Frame counters must grow over this span to count as media flowing now. The
+ * e2e camera sends 15 frames a second (`e2e/media.ts` videoSource) and Opus
+ * one frame each 20 ms, so a second holds about 15 video and 50 audio frames:
+ * a counter that does not move over it is a stall, not frame spacing.
+ */
 export const GROWTH_MS = 1_000;
-/** Media flows on every pair again within this of a fault window's end. */
-export const RUN_RECOVER_MS = 20_000;
+/** Media flows on every pair again within this of a fault window's end: a redial, then one ping tick for the SDK to repair the call's signalling on the new socket. */
+export const RUN_RECOVER_MS = REDIAL_MS + SETTLE_MS;
 /** `participant-left` events a session may fire over a run: a fault is nobody leaving. */
 export const MAX_DEPARTURES = 0;

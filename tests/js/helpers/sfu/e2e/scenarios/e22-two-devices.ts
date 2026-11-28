@@ -37,6 +37,6 @@ export const e22TwoDevices = e2eScenario({
       await call.eventually(call.rosterIsEveryone(), 30_000, "roster after the phone left");
       await call.eventually(call.hearsEveryone(), 30_000, "audio after the phone left");
     });
-    await step("no session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

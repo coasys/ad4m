@@ -38,6 +38,6 @@ export const e5AbruptLoss = e2eScenario({
       await call.eventually(call.rosterIsEveryone(), 60_000, "roster with u3 back");
       await call.eventually(call.hearsEveryone(), 60_000, "audio with u3 back");
     });
-    await step("no surviving session reported an error", () => call.eventually(call.noErrors(), 1, "errors"));
+    await step("no surviving session reported an error", () => call.now(call.noErrors(), "errors"));
   },
 });

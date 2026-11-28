@@ -7,7 +7,10 @@
 import { expect } from "chai";
 import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 
-import { FrameParser, WsShaper, matchEvent, parse, replyTo } from "../helpers/sfu/faults/index.js";
+import { Call, type Check } from "../helpers/sfu/e2e/call.js";
+import { Hearing } from "../helpers/sfu/e2e/media.js";
+import type { Snapshot } from "../helpers/sfu/e2e/protocol.js";
+import { FrameParser, RunChecks, WsShaper, matchEvent, parse, replyTo, type FaultWindow } from "../helpers/sfu/faults/index.js";
 
 /** One RFC 6455 frame. `ext` forces the length's wire form: 0 (7 bits), 2 (16 bits) or 8 (64 bits). */
 function frame(payload: Buffer, { opcode = 0x1, fin = true, ext = 0, mask }: { opcode?: number; fin?: boolean; ext?: 0 | 2 | 8; mask?: Buffer } = {}): Buffer {
@@ -168,5 +171,148 @@ describe("SFU fault layer: WsShaper drops whole messages", () => {
     const reply1 = frame(text(JSON.stringify({ id: 1, result: { accepted: true } })));
     expect(received.includes(reply1)).to.equal(false);
     expect(parse((await rule.first).text)?.id).to.equal(1);
+  });
+});
+
+describe("SFU fault layer: Call.eventually keeps its bound", () => {
+  /** A Call whose snapshots take `ms` and always show a healthy call. No processes. */
+  const slowCall = (ms: number): Call =>
+    Object.assign(Object.create(Call.prototype) as Call, {
+      snapshots: () => new Promise<Map<string, Snapshot>>((resolve) => setTimeout(() => resolve(new Map()), ms)),
+    });
+  const ok: Check = () => [];
+
+  it("fails a success whose snapshots came back after the bound", async () => {
+    const started = Date.now();
+    const error = await slowCall(40).eventually(ok, 5, "late").then(() => null, (e: Error) => e);
+    expect(error?.message).to.match(/^late: not true within 5 ms/);
+    expect(Date.now() - started).to.be.below(40);
+  });
+
+  it("passes a success inside the bound", async () => {
+    expect(await slowCall(5).eventually(ok, 1_000, "in time")).to.be.below(1_000);
+  });
+
+  it("now looks once, with no bound", async () => {
+    await slowCall(20).now(ok, "once");
+    const error = await slowCall(1).now(() => ["u1 hears nothing from u2"], "once").then(() => null, (e: Error) => e);
+    expect(error?.message).to.equal("once: not true — u1 hears nothing from u2");
+  });
+});
+
+describe("SFU fault layer: RunChecks judges a joiner inside an uninterrupted window", () => {
+  /** A snapshot of `me`: `deaf` lists the peers it gets no media from. */
+  const snap = (deaf: string[] = []) => ({ left: [], departures: 0, deaf }) as unknown as Snapshot;
+  const at = (t: number, call: Record<string, string[]>, from = t) => ({ from, t, snaps: new Map(Object.entries(call).map(([me, deaf]) => [me, snap(deaf)])) });
+
+  /** A Call stand-in whose only media check is "me gets media from every other among". */
+  function stubCall(present: string[]): Call {
+    const hears = (among?: string[]): Check => (snaps) =>
+      [...snaps].filter(([me]) => !among || among.includes(me)).flatMap(([me, s]) =>
+        ((s as unknown as { deaf: string[] }).deaf).filter((o) => !among || among.includes(o)).map((o) => `${me} hears nothing from ${o}`));
+    return {
+      present: new Set(present),
+      who: (name: string) => ({ did: `did:${name}` }),
+      hearsEveryone: hears,
+      seesEveryone: () => () => [],
+      framesGrow: () => () => [],
+    } as unknown as Call;
+  }
+
+  /** The violations of one window over `samples`, from start 1000 to end 5000, with a clean recovery after it. */
+  function judge(samples: ReturnType<typeof at>[]): string[] {
+    const checks = new RunChecks(stubCall(["alice", "carol", "dave"]));
+    const internals = checks as unknown as { samples: unknown[]; windows: FaultWindow[]; violations(): string[] };
+    const w = checks.fault("lost-answer", ["carol"], { uninterrupted: true });
+    w.start = 1_000;
+    w.endAt = 5_000;
+    const all3 = { alice: [], carol: [], dave: [] };
+    internals.samples = [at(0, { alice: [], carol: [] }), ...samples, at(6_000, all3), at(7_500, all3)];
+    return internals.violations();
+  }
+
+  it("a joiner still connecting is not a violation", () => {
+    expect(judge([at(1_500, { alice: [], carol: [] }), at(2_500, { alice: [], carol: [], dave: ["carol"] }), at(3_500, { alice: [], carol: [], dave: [] })])).to.deep.equal([]);
+  });
+
+  it("a stall on the joiner's pair after it carried media is a violation", () => {
+    const violations = judge([
+      at(1_500, { alice: [], carol: [] }),
+      at(2_500, { alice: [], carol: [], dave: [] }),
+      at(3_500, { alice: [], carol: ["dave"], dave: [] }),
+    ]);
+    expect(violations).to.have.length(1);
+    expect(violations[0]).to.match(/^during lost-answer on carol \(t\+2500ms\): carol hears nothing from dave/);
+  });
+
+  it("a stall on one joiner pair counts although another pair of the joiner is still connecting", () => {
+    const violations = judge([
+      at(1_500, { alice: [], carol: [] }),
+      at(2_500, { alice: [], carol: [], dave: ["alice"] }),
+      at(3_500, { alice: [], carol: ["dave"], dave: ["alice"] }),
+    ]);
+    expect(violations).to.have.length(1);
+    expect(violations[0]).to.match(/^during lost-answer on carol \(t\+2500ms\): carol hears nothing from dave/);
+  });
+});
+
+describe("SFU fault layer: RunChecks baselines come from whole collections", () => {
+  const snaps = () => new Map([["alice", { left: [], departures: 0 } as unknown as Snapshot]]);
+  const sample = (from: number, t: number) => ({ from, t, snaps: snaps() });
+  const stub = { present: new Set(["alice"]), who: () => ({ did: "did:alice" }), hearsEveryone: () => () => [], seesEveryone: () => () => [], framesGrow: () => () => [] } as unknown as Call;
+
+  /** Recovery of a window that ended at 5000, over `samples`. */
+  function recovered(samples: ReturnType<typeof sample>[]): unknown {
+    const checks = new RunChecks(stub);
+    const internals = checks as unknown as { samples: unknown[]; recovery(w: FaultWindow): { recovered: unknown } };
+    const w = checks.fault("socket-cut", ["alice"]);
+    w.endAt = 5_000;
+    internals.samples = samples;
+    return internals.recovery(w).recovered;
+  }
+
+  it("a collection that started before the window ended is no baseline", () => {
+    // started at 4800, answered at 5200: part of it is from inside the window
+    expect(recovered([sample(4_800, 5_200), sample(6_300, 6_400)])).to.equal(null);
+    expect(recovered([sample(5_100, 5_200), sample(6_300, 6_400)])).to.not.equal(null);
+  });
+
+  it("a baseline must have come back GROWTH_MS before the collection starts", () => {
+    // 5200 + 1000 = 6200 > 6150: one participant's two observations can be under GROWTH_MS apart
+    expect(recovered([sample(5_100, 5_200), sample(6_150, 6_250)])).to.equal(null);
+    expect(recovered([sample(5_100, 5_200), sample(6_200, 6_250)])).to.not.equal(null);
+  });
+});
+
+describe("SFU fault layer: Hearing keeps a participant's frames when a track is replaced", () => {
+  const track = (id: string, kind: string) => ({ id, kind });
+  const heard = (agentDid: string, ...tracks: { id: string; kind: string }[]) => ({ agentDid, stream: { getTracks: () => tracks } }) as never;
+  const receiver = (kind: string, frames: number) => ({ frames, recentFrames: 0, width: 0, height: 0, track: { kind }, dominantTone: () => null, stop() {} });
+
+  it("totals never fall across a replaced track, by DID and by session", () => {
+    const hearing = new Hearing();
+    const receivers = (hearing as unknown as { receivers: Map<string, unknown> }).receivers;
+    receivers.set("a1", receiver("audio", 40));
+    receivers.set("v1", receiver("video", 25));
+    const first = [heard("did:bob", track("a1", "audio"), track("v1", "video"))];
+    const before = hearing.remotes(first, [])["did:bob"];
+    expect([before.audioFrames, before.videoFrames]).to.deep.equal([40, 25]);
+
+    // Both tracks are replaced; the new receivers start at zero and have counted 3 and 2 frames.
+    receivers.set("a2", receiver("audio", 3));
+    receivers.set("v2", receiver("video", 2));
+    const second = [heard("did:bob", track("a2", "audio"), track("v2", "video"))];
+    const after = hearing.remotes(second, [])["did:bob"];
+    expect([after.audioFrames, after.videoFrames]).to.deep.equal([43, 27]);
+    // The same frames are in the next call with another key too.
+    const bySession = hearing.remotes(second, [], () => "p1").p1;
+    expect([bySession.audioFrames, bySession.videoFrames]).to.deep.equal([43, 27]);
+  });
+
+  it("a participant that holds nothing now has no entry", () => {
+    const hearing = new Hearing();
+    (hearing as unknown as { receivers: Map<string, unknown> }).receivers.set("a1", receiver("audio", 9));
+    hearing.remotes([heard("did:bob", track("a1", "audio"))], []);
+    expect(hearing.remotes([], [])).to.deep.equal({});
   });
 });
