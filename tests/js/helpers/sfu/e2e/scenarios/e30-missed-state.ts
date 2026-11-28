@@ -90,7 +90,8 @@ export const e30MissedState = e2eScenario({
       await step("carol's socket is back and answers", () => reconnected(proxy, call.who("carol"), cut, RESUME_MS));
 
       await step(`a sfu.callResume reply that lists carol and carries the roster reaches her within ${RESUME_MS / 1000} s`, async () => {
-        const observed = await within(
+        // A reply already seen is judged by its own crossing time below, even when the reconnect step used up the budget.
+        const observed = resumed.seen[0] ?? await within(
           left(),
           resumed.first,
           `no sfu.callResume reply reached carol within ${RESUME_MS}ms of her socket coming back (state events eaten: ${suppressed()})`,
