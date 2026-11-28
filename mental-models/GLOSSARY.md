@@ -250,6 +250,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **User account** (`users` table, `user_management.rs`): The login of a managed agent: email, DID and password hash. Example: "A user account holds the email and the password hash." [Managed agents](agents/executor/managed-agents.md)
 
+**User cell** (`UserCells`, `user_app_id`, app id `<app id>@<did>`): A managed agent's own copy of a language's Holochain app, installed from the main app's payload under the agent's own key for that language on its first call. It has the main cell's DNA hash, so it joins the same network, and it writes and signs as the managed agent. System languages have no user cells. Example: "The user's zome call goes to its user cell, not to the main agent's cell." [Holochain service](agents/executor/services/holochain.md)
+
 **User token** (`generate_user_jwt`): A JWT that the executor issues at login, with the DID of a managed agent as its `sub`. Its grant holds the default user capabilities. Example: "`user.login` returns the user token." [Managed agents](agents/executor/managed-agents.md) — not: user JWT, login JWT
 
 **Wallet** (`WalletBackend`, `LocalWallet`, `SharedWallet`): The executor's store of all its Ed25519 keys, by name, which the operator's passphrase locks. The keystore is its encrypted form in a file. Example: "The wallet holds the main key and the key of each managed agent." [Wallet and keys](agents/identity/wallet-and-keys.md)

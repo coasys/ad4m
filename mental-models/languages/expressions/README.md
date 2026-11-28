@@ -30,7 +30,7 @@ An **expression** is data signed by an agent: `{author, timestamp, data, proof}`
 | RPC | Does |
 |---|---|
 | `expression.interactions(url)` | lists the actions, from the language's optional `interactions` export |
-| `expression.interact(url, call)` | runs one action: the interaction's own `execute` (TypeScript languages) or the `expressionInteract(address, name, params)` export (Rust ALDK languages) |
+| `expression.interact(url, call)` | runs one action as the caller's agent: the interaction's own `execute` (TypeScript languages) or the `expressionInteract(address, name, params)` export (Rust ALDK languages) |
 
 The parameters must parse as JSON before the executor puts them into the call script.
 

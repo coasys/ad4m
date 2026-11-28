@@ -22,7 +22,7 @@ Sandbox (`JsCore::new_for_language`):
 | Area | Exports |
 |---|---|
 | agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentOpenSealed`, `agentCreateSignedExpression`, `agentGetAllLocalUserDids`, `agentCreateSignedExpressionForUser`, `agentDidForUser` |
-| Holochain | `holochainRegisterDnas`, `holochainCall`, `holochainCallAsync` |
+| Holochain | `holochainRegisterDnas`, `holochainAppInfo`, `holochainCall`, `holochainCallAsync` |
 | HTTP, hash | `httpFetch` (10 s timeout, URL secrets redacted in errors), `hash` |
 | language context | `languageStorageDirectory`, `languageAddress`, `languageSettings` |
 | emit | `emitPerspectiveDiff`, `emitSyncStateChange`, `emitTelepresenceSignal`, `emitSignal` |
@@ -34,9 +34,9 @@ Threading:
 
 1. `process_requests` selects between the request channel and the V8 event loop, so timers and signals run between requests.
 2. Each `Execute(js, ctx, kind)` has a `CallKind`. An **ordered** call runs alone among the ordered calls, in send order: commits, sync, expression creates, interactions, signal delivery. A **concurrent** call (a read, or an emit whose order does not matter) starts at once and runs beside the others, up to `MAX_CONCURRENT_CALLS` (16) in flight. On a WASM language (wasm-bindgen bundle) every call runs ordered. Loading, callback registration and teardown run alone, in send order.
-3. Each call carries its own agent. The runtime registers `ctx` under the call's id (`register_call_agent`); the script takes it out as a call token (`agent_call_token`), and the agent ops act as that token's agent. Code outside any call has no agent, and the ops refuse.
+3. Each call carries its own agent. The runtime registers `ctx` under the call's id (`register_call_agent`); the script takes it out as a call token (`agent_call_token`), and the agent ops and the Holochain ops act as that token's agent ([Holochain service](../../agents/executor/services/holochain.md)). Code outside any call has no agent, and the ops refuse.
 4. Nothing interrupts a running call: its caller waits until it ends. Once the running ordered call has run for the language call deadline (`LANGUAGE_CALL_DEADLINE`, 60 s), an ordered call queued behind it gets an error, and a new ordered call fails at once without being queued. A call that has not started within the deadline after it was sent also gets an error. The runtime never starts a call whose caller has gone.
-5. Holochain signals arrive through `lib.rs::holochain_signal_receiver`. It looks up the cell in `HOLOCHAIN_SIGNAL_HANDLERS` and calls `__handleHolochainSignal__` in that language's isolate.
+5. Holochain signals arrive through `lib.rs::holochain_signal_receiver`. It looks up the cell in `HOLOCHAIN_SIGNAL_HANDLERS` and calls `__handleHolochainSignal__` in that language's isolate, as the main agent, or as the managed agent whose user cell received the signal.
 
 </details>
 
