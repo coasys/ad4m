@@ -203,7 +203,7 @@ the guard checked:
 
 <!-- guard-table:start (generated from the handler map) -->
 
-257 methods: Cap 88, CapAnyPointer 1, Executor 43, Open 9, Operator 38, Owns 73, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 13.
+258 methods: Cap 88, CapAnyPointer 1, Executor 43, Open 9, Operator 39, Owns 73, UserLoginOrOperator 1, UserOrOperator 4. Local only (the operator on this machine): 14.
 
 | Method | Guard |
 |---|---|
@@ -308,6 +308,7 @@ the guard checked:
 | `identity.resolve` | `Cap(agent:READ)` |
 | `identity.status` | `Cap(agent:READ)` |
 | `identity.unlinkSelf` | `UserLoginOrOperator(agent:UPDATE)` |
+| `identity.unwrapRecordKey` | `Operator`, local only |
 | `language.all` | `Cap(language:READ)` |
 | `language.applyTemplate` | `Cap(language:CREATE)` |
 | `language.applyTemplateLocal` | `Cap(language:CREATE)` |

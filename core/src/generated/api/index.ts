@@ -171,6 +171,7 @@ export type { LinkTicketEvent } from "./LinkTicketEvent";
 export type { PostRequestParams } from "./PostRequestParams";
 export type { PrepareDeviceParams } from "./PrepareDeviceParams";
 export type { PreparedDevice } from "./PreparedDevice";
+export type { RecordKey } from "./RecordKey";
 export type { RecordParams } from "./RecordParams";
 export type { RecordPutParams } from "./RecordPutParams";
 export type { RecordReceipt } from "./RecordReceipt";
@@ -181,6 +182,7 @@ export type { RequestsParams } from "./RequestsParams";
 export type { SealedInboxMessage } from "./SealedInboxMessage";
 export type { SealedRecord } from "./SealedRecord";
 export type { StoredRecord } from "./StoredRecord";
+export type { UnwrapRecordKeyParams } from "./UnwrapRecordKeyParams";
 // Key sessions: login with a device key (user.sessionChallenge, user.loginWithKey, ...).
 export type { EndAllSessionsParams } from "./EndAllSessionsParams";
 export type { EndedSessions } from "./EndedSessions";

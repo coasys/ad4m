@@ -1,5 +1,8 @@
 //! The private details record and the request box, through the agent language (spec section
-//! 17). The executor never opens a record: an app opens it with its own `enc` key. A read, a
+//! 17). The executor never decrypts a record: an app does. An app on this machine whose device
+//! is this executor (the desktop's custody service) has no `enc` key of its own, so the operator
+//! may have the executor unwrap the record key of its entry (`identity.unwrapRecordKey`), in
+//! the wallet, and decrypts the record with it. A read, a
 //! record write and a deletion pass the request the caller signed with the identity's master
 //! key (the custody service, a restoring app), or, when the caller gives none, sign one with
 //! this agent's device key at its [`DevicePosition`]. A post is the device key's only: the
@@ -16,8 +19,9 @@ use serde::Serialize;
 use super::device::{body_bytes, device_key, store_request, WalletSigner, REQUEST_TTL_S};
 use super::service::{backend_error, cache_error, db, now, IdentityService};
 use super::types::{
-    convert, DeleteRequestParams, DeviceRequest, PostRequestParams, RecordParams, RecordPutParams,
-    RecordStored, RequestPosted, RequestsParams, SignedRequest, StoredRecord,
+    convert, DeleteRequestParams, DeviceRequest, PostRequestParams, RecordKey, RecordParams,
+    RecordPutParams, RecordStored, RequestPosted, RequestsParams, SealedRecord, SignedRequest,
+    StoredRecord, UnwrapRecordKeyParams,
 };
 use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
@@ -64,6 +68,26 @@ impl DevicePosition {
         .map_err(WsRpcError::internal)?;
         signer.check().map_err(WsRpcError::internal)?;
         Ok(request)
+    }
+
+    /// The device key's signature over the envelope of `sealed` (`coasys:private-record`), for
+    /// an envelope that names this device key as its `signer`; 400 `signer` otherwise.
+    pub fn sign_envelope(&self, sealed: &SealedRecord) -> Result<String, WsRpcError> {
+        use ad4m_identity_core::build::Signer;
+        if sealed.signer != self.key_id {
+            return Err(WsRpcError::bad_request(format!(
+                "signer: an unsigned record must name this device's key {}, not {}",
+                self.key_id, sealed.signer
+            )));
+        }
+        let envelope: ad4m_identity_core::record::SealedRecord =
+            convert(sealed).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+        let bytes = ad4m_identity_core::record::envelope_signing_bytes(&self.scid, &envelope)
+            .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+        let signer = WalletSigner::new(&self.agent).map_err(WsRpcError::internal)?;
+        let sig = signer.sign(&bytes);
+        signer.check().map_err(WsRpcError::internal)?;
+        Ok(ad4m_hash_chain::encode_proof_value(&sig))
     }
 }
 
@@ -148,15 +172,22 @@ impl IdentityService {
     }
 
     /// `identity.recordPut`: writes the next version of the sealed record; answers the version
-    /// and the store's receipt for the write.
+    /// and the store's receipt for the write. An envelope with an empty `sig` is this device's
+    /// write: its `signer` must be the agent's device key id, and the device key signs the
+    /// envelope in the wallet (an app's device key never leaves it). A signed envelope (a
+    /// master-signed write) passes unchanged.
     pub async fn record_put(
         &self,
         agent: &AgentContext,
         params: &RecordPutParams,
     ) -> Result<RecordStored, WsRpcError> {
         let position = self.bound_position(agent).await?;
+        let mut sealed = params.record.clone();
+        if sealed.sig.is_empty() {
+            sealed.sig = position.sign_envelope(&sealed)?;
+        }
         let record: ad4m_ldk::identity::SealedRecord =
-            convert(&params.record).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+            convert(&sealed).map_err(|e| WsRpcError::bad_request(e.to_string()))?;
         let path = format!("/v1/private/{}", position.scid);
         let body = body_bytes(&record).map_err(WsRpcError::internal)?;
         let request = self.request_for(&position, params.request.as_ref(), "PUT", &path, &body)?;
@@ -166,6 +197,33 @@ impl IdentityService {
             .await
             .map_err(backend_error)?;
         wire(&stored)
+    }
+
+    /// `identity.unwrapRecordKey`: the record key that `wrapped`, this device's entry of a
+    /// record of `agent`'s identity, seals to the agent's device key, opened in the wallet. A
+    /// locked wallet is 503 `unavailable`; an entry that does not open is 400 `open`.
+    pub async fn unwrap_record_key(
+        &self,
+        agent: &AgentContext,
+        params: &UnwrapRecordKeyParams,
+    ) -> Result<RecordKey, WsRpcError> {
+        let position = self.bound_position(agent).await?;
+        let wallet = crate::wallet::wallet_backend();
+        let name = agent
+            .wallet_key_name()
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        if !wallet.is_unlocked() {
+            return Err(super::service::error(
+                503,
+                "unavailable: the wallet is locked",
+            ));
+        }
+        let key = wallet
+            .unwrap_record_key(&name, &position.scid, &params.wrapped)
+            .map_err(|e| WsRpcError::bad_request(format!("open: {e}")))?;
+        Ok(RecordKey {
+            key: bs58::encode(key.as_ref()).into_string(),
+        })
     }
 
     /// `identity.requests`: the request box since `since` (unix seconds, default all).
@@ -526,5 +584,138 @@ pub(crate) mod tests {
             .unwrap();
         let seen = world.store.requests.lock().unwrap().clone();
         assert_eq!(seen.last().unwrap().1, given);
+    }
+
+    /// The record key of the agent's entry opens in the wallet and decrypts that version; an
+    /// entry sealed to another device's key does not open.
+    #[tokio::test]
+    async fn the_record_key_of_the_agents_entry_opens_in_the_wallet() {
+        use ad4m_identity_core::record::{decrypt_record, seal_record, PrivateRecord};
+        let world = Bound::new(73).await;
+        let chain = world.log.chain();
+        let record = PrivateRecord {
+            words_checked_at: Some(7),
+            ..Default::default()
+        };
+        let sealed = seal_record(
+            &chain,
+            1,
+            &record,
+            None,
+            &world.log.master,
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap();
+        let key = world
+            .service
+            .unwrap_record_key(
+                &world.agent,
+                &UnwrapRecordKeyParams {
+                    wrapped: sealed.wrapped["d2"].clone(),
+                },
+            )
+            .await
+            .unwrap();
+        let bytes: [u8; 32] = bs58::decode(&key.key)
+            .into_vec()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let receipt = ad4m_identity_core::record::sign_receipt(
+            &world.log.scid(),
+            &sealed,
+            chain.head().seq,
+            &world.store.key.0,
+        )
+        .unwrap();
+        let stores = [world.store.key.multikey()];
+        assert_eq!(
+            decrypt_record(&sealed, &receipt, &chain, &stores, &bytes),
+            Ok(record)
+        );
+        assert!(!format!("{key:?}").contains(&key.key));
+
+        let refused = world
+            .service
+            .unwrap_record_key(
+                &world.agent,
+                &UnwrapRecordKeyParams {
+                    wrapped: sealed.wrapped["d1"].clone(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert!(refused.message.starts_with("open"), "{}", refused.message);
+    }
+
+    /// An envelope with an empty `sig` is this device's write: the device key signs it in the
+    /// wallet, and the store gets an envelope that verifies as the device's. One that names
+    /// another key is refused before anything is signed.
+    #[tokio::test]
+    async fn an_unsigned_envelope_is_signed_by_the_device_key() {
+        use ad4m_identity_core::record::{check_sealed, seal_unsigned, PrivateRecord, Writer};
+        let world = Bound::new(74).await;
+        let chain = world.log.chain();
+        let record = PrivateRecord {
+            words_checked_at: Some(9),
+            ..Default::default()
+        };
+        let unsigned = seal_unsigned(
+            &chain,
+            1,
+            &record,
+            None,
+            "d2".into(),
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap();
+        assert!(unsigned.sig.is_empty());
+        let params = RecordPutParams {
+            record: convert(&unsigned).unwrap(),
+            request: None,
+        };
+        world
+            .service
+            .record_put(&world.agent, &params)
+            .await
+            .unwrap();
+        let stored: ad4m_identity_core::record::SealedRecord = convert(
+            &world
+                .service
+                .record(&world.agent, &RecordParams::default())
+                .await
+                .unwrap()
+                .unwrap()
+                .record,
+        )
+        .unwrap();
+        assert_eq!(
+            check_sealed(&stored, &chain),
+            Ok(Writer::Device("d2".into()))
+        );
+
+        let other = seal_unsigned(
+            &chain,
+            2,
+            &record,
+            None,
+            "m0".into(),
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap();
+        let refused = world
+            .service
+            .record_put(
+                &world.agent,
+                &RecordPutParams {
+                    record: convert(&other).unwrap(),
+                    request: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, 400);
+        assert!(refused.message.starts_with("signer"), "{}", refused.message);
     }
 }

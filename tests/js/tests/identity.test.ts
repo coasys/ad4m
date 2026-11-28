@@ -783,7 +783,10 @@ describe("Identity: create, link, refuse a stranger, revoke, fork, restart", fun
  * holder scans it and pushes an offer ticket into its pre-join inbox, and the executor claims it
  * with the custody service's own X25519 key; then the holder seals the master key to that key, and
  * only the custody service (the custody credential, never the admin credential) reads the sealed
- * message and opens it (the holder plays the custody service). The executor never opens it.
+ * message and opens it: a second holder, connected with `custody: true`, plays the custody service
+ * through `WithEncKey`. The executor never opens it. The private record lists the desktop and
+ * whether it holds the master key; the desktop asks for the master key through the request box
+ * and the holder answers.
  */
 describe("Identity: the device inbox, a ticket in the pre-join inbox and a master key for the custody service", function () {
     this.timeout(600_000);
@@ -792,9 +795,11 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
 
     let store: IdentityStore;
     let holder: Holder;
+    // The desktop's custody service, connected to the desktop's executor.
+    let custody: Holder;
     const nodes: Node[] = [];
     let home: Node, desk: Node;
-    let custody: Ad4mClient;
+    // The custody service's own enc key (`connect` with `custody: true` answers it).
     let custodyEnc = "";
     let did = "";
 
@@ -837,6 +842,23 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         throw new Error("the call was not refused");
     }
 
+    /** One raw RPC `type` to the executor at `port` with `token`: its whole reply. The SDK has no
+     *  call for a method the executor does not have. */
+    function rawCall(port: number, token: string, type: string, params: unknown = {}): Promise<any> {
+        return new Promise<any>((resolve, reject) => {
+            const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws?token=${encodeURIComponent(token)}`);
+            ws.on("open", () => ws.send(JSON.stringify({ id: "raw", type, params })));
+            ws.on("message", (data) => {
+                const reply = JSON.parse(String(data));
+                if (reply.id === "raw") {
+                    ws.close();
+                    resolve(reply);
+                }
+            });
+            ws.on("error", reject);
+        });
+    }
+
     before(async () => {
         if (!fs.existsSync(TEST_DIR)) throw Error("run prepare-test-local before the identity suite");
         writeIdentitySeed();
@@ -852,6 +874,7 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
 
     after(async () => {
         await holder?.stop();
+        await custody?.stop();
         for (const node of nodes) {
             if (node.process) await quitExecutor(node.process, node.ports[0]);
             deregisterPorts(node.ports);
@@ -871,18 +894,27 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const tickets: any[] = [];
         desk.client.on("link-ticket", (event) => tickets.push(event));
         const status = await desk.client.identity.status();
-        custody = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
-        custodyEnc = (await holder.send({ cmd: "custodyKey" })).enc;
+        // The custody service: the client library on the desktop's executor, with the custody
+        // credential over the loopback listener (the admin credential never opens the channel),
+        // and an enc key of its own that the executor never holds.
+        custody = new Holder();
+        const connected = await custody.send({ cmd: "connect", url: baseUrl(desk.ports[0]), token: CUSTODY, custody: true });
+        expect(connected.ok).to.be.true;
+        expect(connected.enc).to.match(/^z6LS/);
+        expect(connected.enc).to.not.equal(status.deviceEnc);
+        custodyEnc = connected.enc;
 
         // The custody service's key comes from the custody service alone.
         expect(await refused(desk.client.identity.prepareDevice(custodyEnc))).to.contain("no-custody-channel");
-        const prepared = await custody.identity.prepareDevice(custodyEnc);
+        // The custody holder's `prepareDevice` passes its enc key (`WithEncKey`).
+        const prepared = await custody.send({ cmd: "prepareDevice" });
         expect(prepared.device).to.match(/^coasys:device:1:/);
         expect(prepared.sign).to.equal(status.deviceKey);
         expect(prepared.enc).to.equal(status.deviceEnc);
         expect(prepared.expires - Math.floor(Date.now() / 1000)).to.be.within(200, 300);
 
-        const pushed = await holder.send({ cmd: "openBound", did, store: store.url, device: prepared.device });
+        // The holder scans the device string: a bound offer, its ticket in the pre-join inbox.
+        const pushed = await holder.send({ cmd: "scan", did, store: store.url, device: prepared.device });
         await pollUntil(() => tickets.length > 0, { timeoutMs: 30_000, intervalMs: 200, label: "link-ticket event" });
         expect(tickets[0].did).to.equal(did);
         expect(tickets[0].offerId).to.equal(pushed.offerId);
@@ -893,7 +925,10 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const claimed = await holder.send({ cmd: "waitClaim" });
         expect(claimed.matchCode).to.equal(tickets[0].matchCode);
         expect(claimed.deviceKey).to.equal(status.deviceKey);
-        expect((await holder.send({ cmd: "confirm" })).seq).to.equal(1);
+        // The custody channel lets the desktop's executor say it may keep the master key.
+        expect(claimed.canKeepMaster).to.be.true;
+        const confirmed = await holder.send({ cmd: "confirm", name: "Desk", kind: "desktop-app" });
+        expect(confirmed).to.deep.equal({ seq: 1, keyId: "d2", master: null, record: 1 });
 
         // Confirmed but not accepted: nothing is bound.
         await pollUntil(
@@ -910,8 +945,12 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         const joined = await desk.client.identity.status();
         expect(joined.did).to.equal(did);
         expect(joined.keyId).to.equal("d2");
+        // The record lists the desktop, read through the holder's executor.
+        const opened = await holder.send({ cmd: "record", did });
+        expect(opened.version).to.equal(1);
+        expect(opened.record.devices.d2).to.include({ name: "Desk", kind: "desktop-app", holdsMaster: false });
         // `deviceEnc` still names the wallet's key; the log lists the custody service's key for
-        // d2, which the next test's seal to it shows.
+        // d2, which the next tests' seal to it shows.
         expect(joined.deviceEnc).to.equal(status.deviceEnc);
 
         // Ending the code now (a Cancel too late) does not undo the join, and says so each time.
@@ -928,7 +967,9 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
     it("hands the master key sealed to the custody service's key to the custody service only, still sealed, until it acknowledges it", async () => {
         const announced: any[] = [];
         desk.client.on("inbox-message", (event) => announced.push(event));
-        const sealed = await holder.send({ cmd: "sealMaster", did, keyId: "d2" });
+        const sealed = await holder.send({ cmd: "sendMaster", did, keyId: "d2" });
+        expect(sealed.record).to.equal(2);
+        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal("offered");
 
         const listed = await desk.client.identity.inbox();
         expect(listed.map((m) => m.id)).to.deep.equal([sealed.id]);
@@ -944,28 +985,76 @@ describe("Identity: the device inbox, a ticket in the pre-join inbox and a maste
         expect(await refused(stranger.identity.inboxSealed())).to.match(/Admin credential required|403/);
         expect(await refused(desk.client.identity.inboxSealed())).to.contain("no-custody-channel");
 
-        // The executor answers the message as the store holds it, sealed; the custody service
-        // opens it with its own key.
-        const messages = await custody.identity.inboxSealed();
+        // The executor has no call that hands out a master key, to any credential.
+        for (const token of [CREDENTIAL, CUSTODY]) {
+            const reply = await rawCall(desk.ports[0], token, "identity.takeMaster");
+            expect(JSON.stringify(reply.error)).to.contain("Unknown type: identity.takeMaster");
+        }
+
+        // The executor answers the message as the store holds it, sealed, to the custody
+        // credential only. It waits until the custody service acknowledges it: answered again
+        // until then, and the admin credential (the renderer's) cannot delete it before custody
+        // stored it.
+        const service = new Ad4mClient(baseUrl(desk.ports[0]), CUSTODY);
+        const messages = await service.identity.inboxSealed();
         expect(messages.map((m) => [m.id, m.keyId])).to.deep.equal([[sealed.id, "d2"]]);
         expect(JSON.stringify(messages)).to.not.contain(sealed.secret);
-        const opened = await holder.send({ cmd: "openSealed", did, message: messages[0] });
-        expect(opened).to.deep.equal({ did, index: 0, secret: sealed.secret });
-        // It waits until the custody service acknowledges it: answered again until then, and
-        // the admin credential (the renderer's) cannot delete it before custody stored it.
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
-        expect(await custody.identity.inboxSealed()).to.deep.equal(messages);
+        expect(await service.identity.inboxSealed()).to.deep.equal(messages);
         expect(await refused(desk.client.identity.inboxAck(sealed.id))).to.contain("no-custody-channel");
         expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([sealed.id]);
         // The custody credential reaches the custody calls only.
-        expect(await refused(custody.agent.status())).to.contain("not-a-custody-call");
-        expect(await custody.identity.inboxAck(sealed.id)).to.be.true;
+        expect(await refused(service.agent.status())).to.contain("not-a-custody-call");
+        expect(await service.identity.inboxAck(sealed.id)).to.be.true;
         expect(await desk.client.identity.inbox()).to.deep.equal([]);
-        expect(await custody.identity.inboxSealed()).to.deep.equal([]);
+        expect(await service.identity.inboxSealed()).to.deep.equal([]);
+    });
+
+    it("the desktop's custody service takes the master key with its own key and the record shows it holds it", async () => {
+        // A holder on a plain connection has no enc key to open a seal with, and the executor
+        // has no `identity.takeMaster`: only the custody connection takes a master key.
+        expect(await refused(holder.send({ cmd: "takeMaster" }))).to.contain("custody connection");
+        expect(await custody.send({ cmd: "takeMaster" })).to.be.null;
+
+        const sent = await holder.send({ cmd: "sendMaster", did, keyId: "d2" });
+        // The executor relays it sealed: the custody service's adapter opens it
+        // (`identity.inboxSealed`, its own fold of the log) and acknowledges it.
+        const taken = await custody.send({ cmd: "takeMaster" });
+        expect(taken).to.deep.equal({ did, index: 0, record: sent.record + 1 });
+        expect(await desk.client.identity.inbox()).to.deep.equal([]);
+        // Both devices read the same record: the desktop holds the master key.
+        for (const reader of [holder, custody]) {
+            const opened = await reader.send({ cmd: "record", did });
+            expect(opened.version).to.equal(sent.record + 1);
+            expect(opened.record.devices.d2).to.include({ name: "Desk", holdsMaster: true });
+        }
+    });
+
+    it("answers the desktop's request for the master key from the holder", async () => {
+        const posted = await custody.send({ cmd: "postRequest", body: { kind: "send-master" } });
+        const listed = await holder.send({ cmd: "requests" });
+        expect(listed.map((r: any) => [r.id, r.by, r.body.kind])).to.deep.equal([[posted.id, "d2", "send-master"]]);
+
+        const answered = await holder.send({ cmd: "answer", did, id: posted.id });
+        expect(answered.answered).to.equal("send-master");
+        expect(await holder.send({ cmd: "requests" })).to.deep.equal([]);
+        // The desktop holds the master key already: an "offered" never replaces `true`, so
+        // the record is not written and still says it holds the key.
+        expect(answered.record).to.deep.equal({ error: "d2 holds the master key already" });
+        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal(true);
+        expect((await desk.client.identity.inbox()).map((m) => m.id)).to.deep.equal([answered.id]);
+        const taken = await custody.send({ cmd: "takeMaster" });
+        expect(taken).to.include({ did, index: 0 });
+        expect((await holder.send({ cmd: "record", did })).record.devices.d2.holdsMaster).to.equal(true);
     });
 
     it("deletes a master key on an executor without the custody channel and never hands it out", async () => {
-        await holder.send({ cmd: "sealMaster", did, keyId: "d1" });
+        // The log decides who may keep the master key, never the record's kind: d1 made the
+        // identity (a standing key of the incept), so the holder sends it even though the record
+        // calls it a server; a key the log does not list is refused.
+        await holder.send({ cmd: "recordDevice", did, keyId: "d1", name: "Home", kind: "server" });
+        expect(await refused(holder.send({ cmd: "sendMaster", did, keyId: "d9" }))).to.contain("may not keep");
+        await holder.send({ cmd: "sendMaster", did, keyId: "d1" });
         expect(await home.client.identity.inbox()).to.deep.equal([]);
         expect(await refused(home.client.identity.inboxSealed())).to.contain("no-custody-channel");
         // A claim saying it keeps the master key is refused there too, with or without a key.

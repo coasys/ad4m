@@ -2,5 +2,7 @@
 
 pub mod create;
 pub mod link;
+pub mod master;
+pub mod requests;
 pub mod revoke;
 pub mod unlink;
