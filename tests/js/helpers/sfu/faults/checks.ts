@@ -15,8 +15,9 @@
  *    and `framesGrow` (audio and video frame counters grown over the last
  *    second, both measured after the window), within `RUN_RECOVER_MS`. An
  *    `uninterrupted` window asks the same of every sample inside it. Who is
- *    judged follows the call: a participant who joins mid-run is judged from
- *    the samples that hold them;
+ *    judged follows the call: a participant who joins inside a window is
+ *    judged from the first sample in which all of its pairs carried media,
+ *    and after the window like everyone else;
  *  - departures stay under `MAX_DEPARTURES`: `departures` counts the
  *    `participant-left` events a session fired, so its growth over the run
  *    is how many peers visibly left (a rebuild fires one per roster member).
@@ -229,13 +230,18 @@ export class RunChecks {
       const endAt = w.endAt;
       const what = `${w.kind} on ${w.users.join("+")}`;
       if (w.uninterrupted) {
-        // Inside the window, only those already in the call when it began owe media: a joiner's tracks start with the join.
-        const inCall = new Set([...good].reverse().find((s) => s.t <= w.start)?.snaps.keys() ?? []);
+        // Inside the window, those already in the call when it began owe media from the start. A joiner owes it
+        // from the first sample in which every pair, the joiner's included, carried media: from then on a stall
+        // on the joiner's pairs is a violation too. Until then the joiner is judged by the recovery after the window.
+        const owing = new Set([...good].reverse().find((s) => s.t <= w.start)?.snaps.keys() ?? []);
         const missing = this.samples.find((s) => s.snaps === null && s.t >= w.start && s.t <= endAt);
         if (missing) violations.push(`no snapshot at t+${missing.t - w.start}ms into ${what} (${missing.error}): no evidence media flowed`);
         let judged = 0;
         for (const s of good.filter((s) => s.t >= w.start && s.t <= endAt)) {
-          const problems = this.mediaProblems(good, s, 0, inCall);
+          if ([...s.snaps.keys()].some((name) => !owing.has(name)) && this.mediaProblems(good, s, 0)?.length === 0) {
+            for (const name of s.snaps.keys()) owing.add(name);
+          }
+          const problems = this.mediaProblems(good, s, 0, owing);
           if (problems === null) continue;
           judged++;
           if (problems.length) {

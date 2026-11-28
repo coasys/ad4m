@@ -9,7 +9,7 @@ import { createServer, connect, type AddressInfo, type Socket } from "node:net";
 
 import { Call, type Check } from "../helpers/sfu/e2e/call.js";
 import type { Snapshot } from "../helpers/sfu/e2e/protocol.js";
-import { FrameParser, WsShaper, matchEvent, parse, replyTo } from "../helpers/sfu/faults/index.js";
+import { FrameParser, RunChecks, WsShaper, matchEvent, parse, replyTo, type FaultWindow } from "../helpers/sfu/faults/index.js";
 
 /** One RFC 6455 frame. `ext` forces the length's wire form: 0 (7 bits), 2 (16 bits) or 8 (64 bits). */
 function frame(payload: Buffer, { opcode = 0x1, fin = true, ext = 0, mask }: { opcode?: number; fin?: boolean; ext?: 0 | 2 | 8; mask?: Buffer } = {}): Buffer {
@@ -199,3 +199,48 @@ describe("SFU fault layer: Call.eventually keeps its bound", () => {
   });
 });
 
+describe("SFU fault layer: RunChecks judges a joiner inside an uninterrupted window", () => {
+  /** A snapshot of `me`: `deaf` lists the peers it gets no media from. */
+  const snap = (deaf: string[] = []) => ({ left: [], departures: 0, deaf }) as unknown as Snapshot;
+  const at = (t: number, call: Record<string, string[]>) => ({ t, snaps: new Map(Object.entries(call).map(([me, deaf]) => [me, snap(deaf)])) });
+
+  /** A Call stand-in whose only media check is "me gets media from every other among". */
+  function stubCall(present: string[]): Call {
+    const hears = (among?: string[]): Check => (snaps) =>
+      [...snaps].filter(([me]) => !among || among.includes(me)).flatMap(([me, s]) =>
+        ((s as unknown as { deaf: string[] }).deaf).filter((o) => !among || among.includes(o)).map((o) => `${me} hears nothing from ${o}`));
+    return {
+      present: new Set(present),
+      who: (name: string) => ({ did: `did:${name}` }),
+      hearsEveryone: hears,
+      seesEveryone: () => () => [],
+      framesGrow: () => () => [],
+    } as unknown as Call;
+  }
+
+  /** The violations of one window over `samples`, from start 1000 to end 5000, with a clean recovery after it. */
+  function judge(samples: ReturnType<typeof at>[]): string[] {
+    const checks = new RunChecks(stubCall(["alice", "carol", "dave"]));
+    const internals = checks as unknown as { samples: unknown[]; windows: FaultWindow[]; violations(): string[] };
+    const w = checks.fault("lost-answer", ["carol"], { uninterrupted: true });
+    w.start = 1_000;
+    w.endAt = 5_000;
+    const all3 = { alice: [], carol: [], dave: [] };
+    internals.samples = [at(0, { alice: [], carol: [] }), ...samples, at(6_000, all3), at(7_500, all3)];
+    return internals.violations();
+  }
+
+  it("a joiner still connecting is not a violation", () => {
+    expect(judge([at(1_500, { alice: [], carol: [] }), at(2_500, { alice: [], carol: [], dave: ["carol"] }), at(3_500, { alice: [], carol: [], dave: [] })])).to.deep.equal([]);
+  });
+
+  it("a stall on the joiner's pair after it carried media is a violation", () => {
+    const violations = judge([
+      at(1_500, { alice: [], carol: [] }),
+      at(2_500, { alice: [], carol: [], dave: [] }),
+      at(3_500, { alice: [], carol: ["dave"], dave: [] }),
+    ]);
+    expect(violations).to.have.length(1);
+    expect(violations[0]).to.match(/^during lost-answer on carol \(t\+2500ms\): carol hears nothing from dave/);
+  });
+});
