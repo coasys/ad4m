@@ -1,3 +1,6 @@
+mod agent_profile_cache;
+#[cfg(test)]
+mod agent_profile_cache_tests;
 mod byte_array;
 #[cfg(test)]
 mod call_deadline_tests;
@@ -61,6 +64,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use tokio::sync::Mutex as TokioMutex;
+use tokio::time::Instant;
 
 /// Produce a JSON string with keys sorted alphabetically (matches json-stable-stringify)
 fn sorted_json_string(val: &JsonValue) -> String {
@@ -132,6 +136,10 @@ pub struct LanguageController {
 
     // One lock per address `install_language` has seen: one install of a language at a time
     installs: Arc<TokioMutex<HashMap<String, Arc<TokioMutex<()>>>>>,
+
+    // Profiles read from the agent language (see `agent_profile_cache`). A std mutex: never
+    // held across an await.
+    agent_profiles: Arc<Mutex<agent_profile_cache::AgentProfileCache>>,
 }
 
 impl LanguageController {
@@ -158,6 +166,7 @@ impl LanguageController {
             language_aliases: Arc::new(TokioMutex::new(HashMap::new())),
             language_names: Arc::new(TokioMutex::new(HashMap::new())),
             installs: Arc::new(TokioMutex::new(HashMap::new())),
+            agent_profiles: Arc::new(Mutex::new(agent_profile_cache::AgentProfileCache::new())),
         }
     }
 
@@ -2653,7 +2662,9 @@ impl LanguageController {
         ))
     }
 
-    /// Get an expression from a language.
+    /// Get an expression from a language. What the agent language returns for a DID is cached
+    /// (`agent_profile_cache`: a profile 5 minutes, "none" 60 s, never an error); every other
+    /// language is asked each time, save the immutable expressions it keeps in the database.
     pub async fn get_expression(
         &self,
         lang_address: &str,
@@ -2669,15 +2680,66 @@ impl LanguageController {
         };
         let lang_address = lang_address.as_str();
 
+        let expression = if !self.is_agent_language(lang_address).await {
+            self.fetch_expression(lang_address, expression_address)
+                .await?
+        } else {
+            let cached = self.agent_profiles.lock().unwrap().get(
+                lang_address,
+                expression_address,
+                Instant::now(),
+            );
+            match cached {
+                Some(expression) => expression,
+                None => {
+                    let generation = self.agent_profiles.lock().unwrap().generation();
+                    let expression = self
+                        .fetch_expression(lang_address, expression_address)
+                        .await?;
+                    self.agent_profiles.lock().unwrap().put(
+                        lang_address,
+                        expression_address,
+                        expression.clone(),
+                        Instant::now(),
+                        generation,
+                    );
+                    expression
+                }
+            }
+        };
+        // Verified on every read, a cache hit too: the verdict depends on the time and on the
+        // identity module, so the cache keeps none.
+        let Some(mut expression) = expression else {
+            return Ok(None);
+        };
+        let record_admitted = self.honours_record(lang_address).await;
+        Self::verify_expression_proof(&mut expression, record_admitted).await;
+        Ok(Some(expression))
+    }
+
+    /// Forgets the cached profile of `did` in the current agent language: a write that did not
+    /// go through `expression_create` (an identity record put) changed it.
+    pub(crate) async fn forget_agent_profile(&self, did: &str) {
+        let agent_language = self.system_addresses.lock().await.agent_language.clone();
+        if let Some(address) = agent_language {
+            self.agent_profiles
+                .lock()
+                .unwrap()
+                .invalidate(&address, did);
+        }
+    }
+
+    /// The expression `lang_address` (resolved) holds at `expression_address`, as the language
+    /// or the database returns it: no agent profile cache, no proof check.
+    async fn fetch_expression(
+        &self,
+        lang_address: &str,
+        expression_address: &str,
+    ) -> Result<Option<JsonValue>, LanguageError> {
         // Handle literal language
         if lang_address == "literal" {
-            let mut decoded = literal_decode(expression_address)?;
-            // Verify signature on literal expressions too
-            Self::verify_expression_proof(&mut decoded, false).await;
-            return Ok(Some(decoded));
+            return Ok(Some(literal_decode(expression_address)?));
         }
-
-        let record_admitted = self.honours_record(lang_address).await;
 
         // Check immutability for caching
         let immutable = self
@@ -2689,10 +2751,7 @@ impl LanguageController {
         if immutable {
             let cached = crate::db_backend::db_backend()._get_expression(expression_address);
             if let Ok(Some(expr)) = cached {
-                let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
-                // Verify and set proof.valid
-                Self::verify_expression_proof(&mut expr_json, record_admitted).await;
-                return Ok(Some(expr_json));
+                return Ok(Some(serde_json::to_value(&expr).unwrap_or(JsonValue::Null)));
             }
         }
 
@@ -2725,7 +2784,7 @@ impl LanguageController {
             return Ok(None);
         }
 
-        let mut expr_json: JsonValue =
+        let expr_json: JsonValue =
             serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
                 message: format!("Failed to parse expression: {}", e),
             })?;
@@ -2742,9 +2801,6 @@ impl LanguageController {
                 let _ = crate::db_backend::db_backend()._add_expression(expression_address, &expr);
             }
         }
-
-        // Verify signature
-        Self::verify_expression_proof(&mut expr_json, record_admitted).await;
 
         Ok(Some(expr_json))
     }
@@ -2769,6 +2825,11 @@ impl LanguageController {
     /// revocation of its key, so a record the agent language serves was admitted; anyone else
     /// can wrap a fresh signature by a revoked key in a record naming an earlier anchor.
     async fn honours_record(&self, lang_address: &str) -> bool {
+        self.is_agent_language(lang_address).await
+    }
+
+    /// Whether `lang_address` (a resolved address) is the current agent language.
+    async fn is_agent_language(&self, lang_address: &str) -> bool {
         self.system_addresses.lock().await.agent_language.as_deref() == Some(lang_address)
     }
 
@@ -2944,7 +3005,26 @@ impl LanguageController {
 
         let result = self
             .execute_on_language_with_context(&resolved_address, &script, agent_context)
-            .await?;
+            .await;
+
+        // A write to the agent language changes what its readers get for the author: forget the
+        // author's cached profile (the agent's DID and the DID the content names, which differ
+        // when an agent publishes the profile of the person it speaks for), whether or not the
+        // call reported success: a call that timed out may have been applied.
+        if self.is_agent_language(&resolved_address).await {
+            let mut dids: Vec<String> = did_for_context(agent_context).ok().into_iter().collect();
+            dids.extend(
+                content
+                    .get("did")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_string),
+            );
+            let mut cache = self.agent_profiles.lock().unwrap();
+            for did in &dids {
+                cache.invalidate(&resolved_address, did);
+            }
+        }
+        let result = result?;
 
         // The dispatcher returns `JSON.stringify(<string>)`, which is the
         // quoted string literal. Parse it as a JSON string so we get the

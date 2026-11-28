@@ -147,6 +147,23 @@ runs until the loop yields. When every handle to the language is gone the
 channel closes and the runtime's thread ends; a call still in flight ends
 with the isolate.
 
+`get_expression` caches only what the **agent language** returns, in
+`agent_profile_cache.rs` (key: language address + DID, so a changed agent language
+never serves old entries): a profile 5 minutes, "no such profile" 60 seconds, never
+an error, at most 10 000 entries (the constants carry the reasons). A hit costs no
+language call at all (not even `isImmutableExpression`). The cache keeps the expression
+unverified (`fetch_expression`): `get_expression` checks the proof on every read, a hit
+too, because the verdict depends on the time (a device key can expire) and on the
+identity module. Every write the executor makes drops the author's entry:
+`expression_create` on the agent language (the signing DID and the content's `did`) and
+`AgentLanguageBackend::put_agent` (`forget_agent_profile`), so a local profile update
+reads back at once. Each drop raises the cache's generation, and a miss stores its
+answer only if the generation it read before the fetch still holds: a read in flight
+across a write never puts the old profile back. A profile
+changed on another executor shows after the TTL, as in the SDK's own 5-minute cache.
+Readers that need the live record (`agent_version`) call the language directly.
+Other languages are not cached here (only immutable expressions, in the database).
+
 Calls into a Language are built as JS source via `format!` and evaluated (≈20
 sites in `mod.rs`). A malformed template used to deadlock that language forever
 (`js_core/mod.rs` comments). Keep templates small and escape inputs with
