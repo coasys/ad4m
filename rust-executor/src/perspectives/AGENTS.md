@@ -227,3 +227,8 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   pins the links and the SDK test decodes the same file, so update it in the same change.
 - Flow transition URIs are `{ns}{flow}.transition/{from}/{to}/{action}`, each part
   percent-encoded; `SHACLFlow.transitionUri` in core builds the same string.
+
+- Merge-up gotcha: a branch made before the `PersistedHandle` migration
+  (`perspective_instance/persisted_handle.rs`) still calls `persisted.lock()`.
+  That call is now `load()`, `snapshot()` or `update(|h| ...)`. After a merge-up the
+  tests fail with `E0599`. Port the call sites.
