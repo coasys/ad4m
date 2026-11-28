@@ -23,12 +23,15 @@ const CAMERA: Size = { width: 1280, height: 720 };
 const LOW: Size = { width: CAMERA.width / 4, height: CAMERA.height / 4 };
 /**
  * The capped receiver's downlink. The premise, checked in the shaped step from
- * the senders' own numbers: the SFU steps a receiver down when its traffic
- * exceeds its estimate, and the estimate of a shaped link cannot exceed the
- * cap. So two low layers plus the audio must fit under the cap (the most the
- * estimate can be, and what the link carried in the shaped step is measured
- * beside it), while a low and a medium, or two mediums, plus the audio exceed
- * it, and must be stepped down.
+ * the senders' own numbers: a shortfall is an estimate strictly under the
+ * traffic, and the estimate of a shaped link is at most the cap. Two low
+ * layers plus the audio must fit under the cap (what the link carried in the
+ * shaped step is measured beside it). A low and a medium, or two mediums,
+ * plus the audio exceed the cap, so that traffic stays above any estimate the
+ * shaper can produce and the selector steps it down once two rate windows
+ * agree. `cap <= 0.80 * (low + medium)` is not the premise: the measured pair
+ * is about 800 kbit/s against this 700 kbit/s cap (about 0.88), the mild band,
+ * which those two windows still answer.
  */
 const CAP_KBIT = 700;
 /** What the SFU budgets each audio track at least (`AUDIO_RESERVE_BPS`). */
@@ -171,7 +174,8 @@ export const e24ReceiverBandwidth = e2eScenario({
         const [a, b] = senders.map((name) => offered[name]);
         const fixed = a.audio + b.audio;
         const carried = (passedBytes * 8) / 1000 / seconds;
-        // The allocator steps a track down when the traffic exceeds the estimate (cost > estimate), and the estimate is at most the cap.
+        // A shortfall is traffic strictly above the estimate, and a shaped link's estimate is at most the cap.
+        // `CAP_KBIT <= 0.80 * lowAndMedium` is the wrong gate here: this pair measures about 0.88 of the cap (mild), and a mild cap still steps down after two windows.
         const twoLows = a.low + b.low + fixed;
         const lowAndMedium = Math.min(a.low + b.medium, b.low + a.medium) + fixed;
         const twoMediums = a.medium + b.medium + fixed;
@@ -183,7 +187,7 @@ export const e24ReceiverBandwidth = e2eScenario({
         console.log(`e24: cap ${CAP_KBIT} kbit/s, carried ${carried.toFixed(0)}; two lows + fixed ${twoLows.toFixed(0)}, a low and a medium + fixed ${lowAndMedium.toFixed(0)}, two mediums + fixed ${twoMediums.toFixed(0)} (fixed ${fixed.toFixed(0)})`);
         const broken: string[] = [];
         if (!(twoLows <= CAP_KBIT)) broken.push(`two lows + fixed (${twoLows.toFixed(0)}) do not fit under the cap`);
-        if (!(lowAndMedium > CAP_KBIT)) broken.push(`a low and a medium + fixed (${lowAndMedium.toFixed(0)}) fit under the cap`);
+        if (!(CAP_KBIT < lowAndMedium)) broken.push(`a low and a medium + fixed (${lowAndMedium.toFixed(0)}) fit under the cap`);
         if (!(twoMediums > CAP_KBIT)) broken.push(`two mediums + fixed (${twoMediums.toFixed(0)}) fit under the cap`);
         if (broken.length) throw new Error(`the cap's premise fails at ${CAP_KBIT} kbit/s: ${broken.join("; ")}`);
       });

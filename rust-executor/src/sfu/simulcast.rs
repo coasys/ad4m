@@ -31,12 +31,13 @@
 //!   measured rate). It is never touched;
 //! - when the estimate falls to [`STEP_DOWN_IMMEDIATE`] of the layers
 //!   forwarded plus the fixed traffic, or below it, one track steps down one
-//!   flowing layer at once: the one that saves the most. Between there and
-//!   [`STEP_DOWN_RATIO`] the shortfall has to hold for [`STEP_DOWN_HOLD`]
-//!   first. A shallower dip does not step down. str0m's overuse response
-//!   holds the estimate near 0.85 of the throughput, and a loaded runner
-//!   also spikes the measured rate for a few seconds; stepping down on
-//!   either lets a delay spike undo an upgrade;
+//!   flowing layer at once: the one that saves the most. Downlink loss or
+//!   NACK growth does the same. Otherwise a shortfall is an estimate
+//!   strictly under the traffic, and it steps down only once two
+//!   non-overlapping [`RATE_WINDOW`]s have both shown it
+//!   ([`STEP_DOWN_CONFIRM`]). At the traffic the estimate of a link with no
+//!   bottleneck settles, and that is not a cap. A single window of a
+//!   send-rate spike is not one either;
 //! - upgrades wait for one hold per receiver: the estimate must cover
 //!   [`UPGRADE_HEADROOM`] times the traffic with the cheapest step up (fixed
 //!   traffic included) for [`UPGRADE_HOLD`] without a dip, and only once an estimate arrived that
@@ -53,8 +54,10 @@
 //! There is no timer. An allocation runs when a receiver's estimate arrives,
 //! its tracks or ceiling change, or a switch commits, and at the one
 //! [`LayerSelector::next_wake`] instant of a receiver with a pending upgrade
-//! (the hold's end, or the moment a layer's rate is first measured). The
-//! estimator is silent on a steady link, so its events cannot be the clock.
+//! or a step-down waiting on its next rate window (the hold's end, the
+//! confirmation's next sample, or the moment a layer's rate is first
+//! measured). The estimator is silent on a steady link, so its events cannot
+//! be the clock.
 //!
 //! A receiver the selector does not manage (a cascade pipe has no
 //! estimate) gets the best layer its ceiling allows.
@@ -103,34 +106,33 @@ const PACKET_OVERHEAD_BYTES: u64 = 32;
 /// p10 and 1.5 at p50, so a rule that steps down above the traffic is
 /// unstable. H only keeps an upgrade from landing on the traffic.
 const UPGRADE_HEADROOM: f64 = 1.25;
-/// Step down when E <= this fraction of C + F.
-///
-/// str0m's overuse response sets the estimate to 0.85 of the observed
-/// throughput and then holds it there while that throughput stays put (`BETA`
-/// in its AIMD controller). On loopback that is a delay spike, not a path
-/// that cannot carry the layers: under CPU load the e2e runs stepped a
-/// receiver off a layer two seconds after granting it (estimate 0.86 of the
-/// traffic) and the climb back took longer than the scenario waits. A shaped
-/// downlink lands far below (700 kbit/s against two high layers is about
-/// 0.2, and against a low plus a medium still under this line once loss pulls
-/// the estimate below the cap). 0.80 sits under the 0.85 overuse floor.
-const STEP_DOWN_RATIO: f64 = 0.80;
 /// Step down at once when E is at or under this fraction of C + F.
 ///
 /// A network cut, and a shaped link that is still being sent the high
-/// layers, land here. A loopback send-rate spike bottomed just above it, so
-/// that spike waits out [`STEP_DOWN_HOLD`] instead of dropping a layer for a
-/// burst the next window no longer shows.
+/// layers, land here. The step is backdated by [`STEP_DOWN_CONFIRM`], so
+/// the next layer does not wait while the collapse continues. A loopback
+/// send-rate spike bottomed just above this line; that spike is a single
+/// rate window and does not step down.
 const STEP_DOWN_IMMEDIATE: f64 = 0.50;
-/// How long E must stay at or under [`STEP_DOWN_RATIO`] of C + F before a
-/// step down, unless it is already under [`STEP_DOWN_IMMEDIATE`].
+/// How long a shortfall strictly under the traffic must show before a step,
+/// unless it has collapsed or downlink loss grew.
 ///
-/// On a loaded runner the estimate sat between those two lines for about 4 s
-/// and then recovered, which knocked a receiver off the high layer for the
-/// rest of a 10 s check. 6 s is past those dips. A real cap stays under the
-/// line for the whole shaped window, so only the first step waits: the hold
-/// does not start over while the shortfall continues.
-const STEP_DOWN_HOLD: Duration = Duration::from_secs(6);
+/// Two non-overlapping [`RATE_WINDOW`]s. The window that first shows the
+/// shortfall is `(since - RATE_WINDOW, since]`. A burst stays in that
+/// sliding window for one more window after it ends, so the next window
+/// that shares no packets with the first is
+/// `(since + RATE_WINDOW, since + 2 * RATE_WINDOW]`. The wake at one window
+/// samples the first fresh window; the step is at two. A cap that holds,
+/// moderate (about 0.6 to 0.80 of the traffic) or mild (under the traffic,
+/// including a reading that stays on str0m's 0.85 overuse floor), is still
+/// there. At the traffic the estimate of a link with no bottleneck settles,
+/// and that is not a cap. No second meter: at `since + 2 * RATE_WINDOW` the
+/// meter's own window has dropped every packet from the first.
+const STEP_DOWN_CONFIRM: Duration = Duration::from_secs(4);
+/// A downlink loss fraction this far above the previous sample confirms a
+/// shortfall at once. Any increase in the cumulative NACK count does too.
+/// The first sample of a stream is the baseline, not growth.
+const LOSS_GROWTH: f32 = 0.01;
 /// How long that headroom must hold, without a dip, before an upgrade.
 const UPGRADE_HOLD: Duration = Duration::from_secs(4);
 /// What each forwarded audio track is budgeted at least.
@@ -281,11 +283,18 @@ struct Receiver {
     /// Since when the cheapest upgrade step has fit the headroom, without a
     /// dip. One start per receiver, re-checked at every allocation run.
     hold_since: Option<Instant>,
-    /// Since when the estimate has been at or under [`STEP_DOWN_RATIO`] of
-    /// the traffic. A committed switch does not clear it: the shortfall is
-    /// the estimate's, and the next layer steps as soon as the hold has
-    /// elapsed.
+    /// Since when the estimate has been strictly under the traffic. A
+    /// committed switch does not clear it: the shortfall is the estimate's,
+    /// and the next layer steps as soon as [`STEP_DOWN_CONFIRM`] has elapsed.
+    /// A collapse, or downlink loss, backdates it by that long.
     under_since: Option<Instant>,
+    /// Last cumulative NACK count and loss fraction of each egress stream.
+    loss_seen: HashMap<(Mid, Option<Rid>), (u64, Option<f32>)>,
+    /// Downlink NACKs or loss grew since the previous sample. While the
+    /// estimate is under the traffic, the next allocation steps down at
+    /// once. Cleared when that step runs, when the estimate recovers, and
+    /// when there is no estimate.
+    loss_bypass: bool,
     /// When the next allocation is due without an event.
     wake: Option<Instant>,
     /// The last probing demand handed out.
@@ -302,6 +311,8 @@ impl Default for Receiver {
             caps: HashMap::new(),
             hold_since: None,
             under_since: None,
+            loss_seen: HashMap::new(),
+            loss_bypass: false,
             wake: None,
             demand: 0,
         }
@@ -490,6 +501,43 @@ impl LayerSelector {
         self.allocate(now, receiver);
     }
 
+    /// One egress stream's downlink feedback for `receiver`. `nacks` is that
+    /// stream's cumulative NACK count. `loss` is the fraction in the latest
+    /// receiver report, or `None` when that report carried none.
+    ///
+    /// The first sample is the baseline. A later sample whose NACK count
+    /// rose, or whose loss fraction rose by at least [`LOSS_GROWTH`], makes
+    /// the next shortfall step down at once.
+    pub fn note_egress_loss(
+        &mut self,
+        now: Instant,
+        receiver: &ParticipantId,
+        stream: (Mid, Option<Rid>),
+        nacks: u64,
+        loss: Option<f32>,
+    ) {
+        let grew = {
+            let state = self.receivers.entry(receiver.clone()).or_default();
+            let prev = state.loss_seen.insert(stream, (nacks, loss));
+            match prev {
+                Some((prev_nacks, prev_loss)) => {
+                    nacks > prev_nacks
+                        || matches!(
+                            (prev_loss, loss),
+                            (Some(before), Some(after)) if after >= before + LOSS_GROWTH
+                        )
+                }
+                None => false,
+            }
+        };
+        if grew {
+            if let Some(state) = self.receivers.get_mut(receiver) {
+                state.loss_bypass = true;
+            }
+            self.allocate(now, receiver);
+        }
+    }
+
     /// `receiver` asked for at most the layer named by `preference` (`low`,
     /// `medium`; `high`, `auto` and anything else leave the budget to decide).
     pub fn set_ceiling(&mut self, now: Instant, receiver: &ParticipantId, preference: &str) {
@@ -667,29 +715,41 @@ impl LayerSelector {
         let Some((estimate, can_probe)) = state.estimate.filter(|_| state.bwe) else {
             state.hold_since = None;
             state.under_since = None;
+            state.loss_bypass = false;
             return demand;
         };
         let spent: u64 = videos.iter().map(|v| v.cost).sum();
         let traffic = spent + fixed;
 
-        let under = |ratio: f64| traffic > 0 && (estimate as f64) <= traffic as f64 * ratio;
-        if under(STEP_DOWN_RATIO) {
-            // Under STEP_DOWN_IMMEDIATE the path is not carrying the layers:
-            // step now. Between that and STEP_DOWN_RATIO, wait out
-            // STEP_DOWN_HOLD. A shallower shortfall is the estimator's
-            // overuse floor, not a path that cannot carry what is sent.
+        // A shortfall is an estimate strictly under the traffic. At the
+        // traffic a link with no bottleneck settles, and that is not a cap.
+        // At or under half, or when downlink loss grew, step now and backdate
+        // so the next layer does not wait. Otherwise two non-overlapping
+        // rate windows have to agree.
+        let short = traffic > 0 && (estimate as f64) < traffic as f64;
+        let collapsed = traffic > 0 && (estimate as f64) <= traffic as f64 * STEP_DOWN_IMMEDIATE;
+        if short {
             state.hold_since = None;
-            let since = if under(STEP_DOWN_IMMEDIATE) {
-                now.checked_sub(STEP_DOWN_HOLD).unwrap_or(now)
+            let since = if collapsed || state.loss_bypass {
+                now.checked_sub(STEP_DOWN_CONFIRM).unwrap_or(now)
             } else {
                 *state.under_since.get_or_insert(now)
             };
             state.under_since = Some(since);
-            let due = since + STEP_DOWN_HOLD;
+            let due = since + STEP_DOWN_CONFIRM;
             if now < due {
-                state.wake = Some(state.wake.map_or(due, |at| at.min(due)));
+                // The first fresh window ends one RATE_WINDOW after `since`
+                // and shares no packets with the window that armed this.
+                // Sample it, then the one after it.
+                let sample = if now < since + RATE_WINDOW {
+                    since + RATE_WINDOW
+                } else {
+                    due
+                };
+                state.wake = Some(state.wake.map_or(sample, |at| at.min(sample)));
                 return demand;
             }
+            state.loss_bypass = false;
             let lowered = videos
                 .iter()
                 .filter(|v| !v.pending)
@@ -714,8 +774,9 @@ impl LayerSelector {
             return demand;
         }
         state.under_since = None;
+        state.loss_bypass = false;
 
-        // Above the step-down line: look for an upgrade, never while a switch is pending,
+        // At or above the traffic: look for an upgrade, never while a switch is pending,
         // before the transport can probe, or while a forwarded track's cost is
         // unknown (audio, video or a layer not measured yet counts as 0 or as
         // its reserve, so the budget would be judged on too little).
@@ -1371,10 +1432,10 @@ mod tests {
         let mut sim = Sim::new(&[RATES, BIG_HIGH, RATES]);
         sim.place(2);
         // 1.5 + 2.5 + 1.5 Mbit/s against an estimate of 4: 0.73 of the
-        // traffic, so the step waits out the hold, and the next run does not.
+        // traffic, so the step waits out the two windows, and the next run does not.
         sim.estimate(4_000_000, true);
         assert_eq!(sim.caps(), [2, 2, 2]);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
         sim.s.run_due(sim.now);
         // The track that saves the most steps down, one layer.
         assert_eq!(sim.caps(), [2, 1, 2]);
@@ -1391,11 +1452,11 @@ mod tests {
     fn the_old_layers_cost_counts_until_the_switch_commits() {
         let mut sim = Sim::new(&[RATES, BIG_HIGH]);
         sim.place(2);
-        // 1.5 + 2.5 = 4.0 against an estimate of 2.8 (0.70): the hold, then
-        // the big one steps down.
+        // 1.5 + 2.5 = 4.0 against an estimate of 2.8 (0.70): the two windows,
+        // then the big one steps down.
         sim.estimate(2_800_000, true);
         assert_eq!(sim.caps(), [2, 2]);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [2, 1]);
         // With its new cost (1.5 + 0.6 = 2.1) the estimate would carry it, but
@@ -1421,16 +1482,15 @@ mod tests {
         sim.advance(WARM_UP_MS);
         sim.place(1);
         assert_eq!(sim.s.route(sim.now, &RECEIVER, &audio, None, None), FORWARD);
-        // 0.72 Mbit/s is above 0.80 of medium (0.6) plus the audio's rate
-        // (105.6 kbit/s, above the 64 kbit/s reserve): that line is 0.564.
+        // 0.72 Mbit/s is above medium (0.6) plus the audio's rate
+        // (105.6 kbit/s, above the 64 kbit/s reserve): the traffic is 0.706.
         sim.estimate(720_000, true);
         assert_eq!(sim.caps(), [1]);
-        // 0.50 Mbit/s is above 0.80 of medium alone (0.480) and at or under
-        // 0.80 of medium plus the audio (0.564), but above half of that, so
-        // the audio puts it in the held band rather than an immediate drop.
+        // 0.50 Mbit/s is under that traffic and above half of it, so the
+        // audio puts it in the confirmed band rather than an immediate drop.
         sim.estimate(500_000, true);
         assert_eq!(sim.caps(), [1]);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [0]);
         // Zero estimate: video at the floor, audio still forwarded.
@@ -1592,21 +1652,29 @@ mod tests {
         sim.advance(10);
         let first = sim.now;
         sim.s.route(sim.now, &RECEIVER, &audio, None, None);
-        // 0.55 Mbit/s stays above 0.80 of medium plus the 64 kbit/s reserve
-        // (0.531) and at or under 0.80 of medium plus the audio's real rate
-        // (0.564). That is above half the traffic, so the measurement starts
-        // the step-down hold; the step lands when the hold elapses.
-        sim.estimate(550_000, true);
+        // 0.68 Mbit/s is above medium plus the 64 kbit/s reserve (0.664) and
+        // under medium plus the audio's real rate (0.706). The measurement
+        // is what starts the confirmation; the step lands when it elapses.
+        sim.estimate(680_000, true);
         assert_eq!(sim.caps(), [1]);
         // The measurement is the wake: the allocation runs when it is known.
         assert_eq!(sim.s.next_wake(), Some(first + RATE_WINDOW));
         sim.advance(RATE_WINDOW.as_millis() as u64);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [1]);
-        let due = sim.now + STEP_DOWN_HOLD;
-        assert_eq!(sim.s.next_wake(), Some(due));
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
-        sim.s.run_due(due);
+        // The measurement armed the shortfall. The next wake is the first
+        // fresh window, not the step.
+        let armed = sim.now;
+        assert_eq!(sim.s.next_wake(), Some(armed + RATE_WINDOW));
+        sim.advance(RATE_WINDOW.as_millis() as u64 - 10);
+        sim.estimate(680_000, true);
+        assert_eq!(sim.caps(), [1]);
+        sim.advance(10);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [1], "one fresh window is not a confirmation");
+        assert_eq!(sim.s.next_wake(), Some(armed + STEP_DOWN_CONFIRM));
+        sim.advance(RATE_WINDOW.as_millis() as u64);
+        sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [0]);
     }
 
@@ -1883,29 +1951,38 @@ mod tests {
         let rate = sim.s.meters[&track].layers[&Some(high)]
             .rate(sim.now)
             .expect("a rate");
-        // The step-down line of the keyframe rate is above the steady 1.5, so
-        // the keyframe is what crosses it. Just above that line stays.
-        let line = (rate as f64 * STEP_DOWN_RATIO) as u64;
-        assert!(line > RATES[2], "{rate}");
-        sim.estimate(line + 1, true);
+        // The keyframe rate is above the steady 1.5, so the keyframe is what
+        // puts an estimate under the traffic. At the rate itself, where a
+        // link with no bottleneck settles, nothing steps down.
+        assert!(rate > RATES[2], "{rate}");
+        sim.estimate(rate, true);
         assert_eq!(sim.caps(), [2]);
-        // On the line the hold starts. The keyframe leaves the 2 s window
-        // before the 6 s hold, and the steady rate is under the line: no step.
+        // Four fifths of the inflated rate is under the traffic and still
+        // above the steady rate. The keyframe leaves the 2 s window before
+        // two fresh windows agree, so the steady rate is under the estimate
+        // and nothing steps.
+        let line = rate * 4 / 5;
+        assert!(line > RATES[2], "{rate}");
         sim.estimate(line, true);
         assert_eq!(sim.caps(), [2]);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
         sim.s.run_due(sim.now);
         assert_eq!(sim.caps(), [2]);
-        // Keyframes that keep the window over the line for the whole hold do.
+        // The keyframe has left the window. An estimate above the steady
+        // rate clears the timer, so the next phase starts from nothing.
+        sim.estimate(RATES[2] + 1, true);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        // Keyframes that keep every fresh window under the estimate do.
         sim.s
             .observe(sim.now, &track, Some(&high), 150_000, 105, false);
         let rate = sim.s.meters[&track].layers[&Some(high)]
             .rate(sim.now)
             .expect("a rate");
-        let line = (rate as f64 * STEP_DOWN_RATIO) as u64;
+        let line = rate * 4 / 5;
+        assert!(line > RATES[2], "{rate}");
         sim.estimate(line, true);
         assert_eq!(sim.caps(), [2]);
-        for _ in 0..STEP_DOWN_HOLD.as_secs() {
+        for _ in 0..STEP_DOWN_CONFIRM.as_secs() {
             sim.advance(1_000);
             sim.s
                 .observe(sim.now, &track, Some(&high), 150_000, 105, false);
@@ -1969,12 +2046,12 @@ mod tests {
         };
         feed(&mut sim, WARM_UP_MS, true);
         sim.s.route(sim.now, &RECEIVER, &plain, None, None);
-        // 1.5 + 1.0 Mbit/s: 3.2 is above 0.80 of that, so nothing is lowered.
+        // 1.5 + 1.0 Mbit/s: 3.2 is above the traffic, so nothing is lowered.
         sim.estimate(3_200_000, false);
         assert_eq!(sim.caps(), [2]);
         // The plain video freezes for longer than a layer may be silent, and
-        // the estimate falls to the high layer's own rate. That is above
-        // 0.80 of the high layer, and the frozen video is not there to lower.
+        // the estimate falls to the high layer's own rate. That is not under
+        // the traffic, and the frozen video is not there to lower.
         feed(&mut sim, LAYER_TIMEOUT.as_millis() as u64 + 500, false);
         sim.estimate(1_500_000, false);
         assert_eq!(sim.caps(), [2]);
@@ -1986,13 +2063,15 @@ mod tests {
         assert_eq!(sim.s.next_wake(), Some(measured));
         feed(&mut sim, RATE_WINDOW.as_millis() as u64 - 10, true);
         sim.s.run_due(measured);
-        // High (1.5) plus the resumed video (1.0) is 2.5 Mbit/s. 0.80 of
-        // that is 2.0, and the estimate of 1.5 is under it but above half,
-        // so the measurement starts the hold and the step waits it out.
+        // High (1.5) plus the resumed video (1.0) is 2.5 Mbit/s. The estimate
+        // of 1.5 is under that and above half, so the measurement starts the
+        // confirmation and the step waits it out.
         assert_eq!(sim.caps(), [2]);
-        assert_eq!(sim.s.next_wake(), Some(measured + STEP_DOWN_HOLD));
-        feed(&mut sim, STEP_DOWN_HOLD.as_millis() as u64 + 10, true);
-        sim.s.run_due(measured + STEP_DOWN_HOLD);
+        // The measurement armed the shortfall. The next wake samples the
+        // first fresh window; the step is a window after that.
+        assert_eq!(sim.s.next_wake(), Some(measured + RATE_WINDOW));
+        feed(&mut sim, STEP_DOWN_CONFIRM.as_millis() as u64 + 10, true);
+        sim.s.run_due(measured + STEP_DOWN_CONFIRM);
         assert_eq!(sim.caps(), [1]);
     }
 
@@ -2057,39 +2136,208 @@ mod tests {
     }
 
     #[test]
-    fn an_overuse_sized_dip_does_not_step_down_and_eighty_percent_does() {
-        let mut sim = Sim::new(&[RATES, RATES]);
-        sim.place(1);
-        // Two mediums: 1.2 Mbit/s. str0m holds an overuse at 0.85 of the
-        // observed throughput; that dip must not drop a layer.
-        sim.estimate((1_200_000.0 * 0.85) as u64, true);
-        assert_eq!(sim.caps(), [1, 1]);
-        // Just under the traffic, which is where a loaded loopback dropped
-        // uncapped receivers in e24 (0.98 of what was sent). That stays too.
-        sim.estimate(1_199_999, true);
-        assert_eq!(sim.caps(), [1, 1]);
-        // At 0.80 of the traffic the hold starts, and a recovery cancels it.
-        let line = (1_200_000.0 * STEP_DOWN_RATIO) as u64;
-        sim.estimate(line, true);
-        assert_eq!(sim.caps(), [1, 1]);
-        sim.estimate(1_200_000, true);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64);
+    fn the_step_down_confirmation_is_two_rate_windows() {
+        assert_eq!(STEP_DOWN_CONFIRM, 2 * RATE_WINDOW);
+    }
+
+    /// One high layer, already forwarded, and `estimate` just applied.
+    fn on_high(estimate: u64) -> Sim {
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(2);
+        sim.estimate(estimate, true);
+        sim
+    }
+
+    /// The shortfall is already on. One fresh window does not step; the
+    /// second does.
+    fn steps_on_the_second_window(sim: &mut Sim) {
+        let start = sim.now;
+        assert_eq!(sim.caps(), [2]);
+        assert_eq!(sim.s.next_wake(), Some(start + RATE_WINDOW));
+        sim.advance(RATE_WINDOW.as_millis() as u64);
         sim.s.run_due(sim.now);
-        assert_eq!(sim.caps(), [1, 1]);
-        // Back under the line: nothing until the hold elapses, then one track.
-        sim.estimate(line, true);
-        assert_eq!(sim.caps(), [1, 1]);
-        sim.advance(STEP_DOWN_HOLD.as_millis() as u64 - 10);
-        sim.s.run_due(sim.now);
-        assert_eq!(sim.caps(), [1, 1]);
+        assert_eq!(sim.caps(), [2], "one fresh window is not a confirmation");
+        assert_eq!(sim.s.next_wake(), Some(start + STEP_DOWN_CONFIRM));
+        // An estimate event runs the allocation whenever it arrives. Ten
+        // milliseconds early is still the first fresh window.
+        sim.advance(RATE_WINDOW.as_millis() as u64 - 10);
+        let estimate = sim.s.receivers[&RECEIVER].estimate.unwrap().0;
+        sim.estimate(estimate, true);
+        assert_eq!(sim.caps(), [2]);
         sim.advance(10);
         sim.s.run_due(sim.now);
-        assert_eq!(sim.caps(), [0, 1]);
-        // Half the traffic, or less, steps at once.
+        assert_eq!(sim.caps(), [1]);
+    }
+
+    #[test]
+    fn a_single_rate_window_dip_then_recovery_does_not_step_down() {
+        let mut sim = on_high((RATES[2] as f64 * 0.65) as u64);
+        let start = sim.now;
+        // The first fresh window agrees. A runner spike looks like this and
+        // then the measured rate falls back.
+        sim.advance(RATE_WINDOW.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [2]);
+        assert_eq!(sim.s.next_wake(), Some(start + STEP_DOWN_CONFIRM));
+        // Back at the traffic: the timer is gone, and the old deadline does
+        // not step down.
+        sim.estimate(RATES[2], true);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [2]);
+    }
+
+    #[test]
+    fn two_agreeing_windows_in_the_moderate_band_step_down() {
+        // 0.65 and the old 0.80 line. Both are under the traffic and above
+        // half, so each waits for two fresh windows and then drops one layer.
+        for ratio in [0.65, 0.80] {
+            let mut sim = on_high((RATES[2] as f64 * ratio) as u64);
+            steps_on_the_second_window(&mut sim);
+        }
+    }
+
+    #[test]
+    fn a_mild_cap_steps_down_after_two_windows() {
+        // (0.80, 1.0) of the traffic, open at 1. str0m's overuse floor is
+        // 0.85 of throughput, and a loaded loopback also read 0.98. One
+        // window of either is the spike above. Two fresh windows that still
+        // show it are a cap: the receiver is over budget, and nothing else
+        // ever steps it down.
+        //
+        // The step does not oscillate with the upgrade. High is 1.5 Mbit/s
+        // and medium 0.6. Climbing back needs 1.25 * 1.5 = 1.875. An estimate
+        // under 1.5 cannot.
+        for estimate in [
+            (RATES[2] as f64 * 0.85) as u64,
+            (RATES[2] as f64 * 0.90) as u64,
+            RATES[2] - 1,
+        ] {
+            let mut sim = on_high(estimate);
+            steps_on_the_second_window(&mut sim);
+        }
+        // At the traffic, and above it, there is no shortfall.
+        for estimate in [RATES[2], RATES[2] + 1] {
+            let mut sim = on_high(estimate);
+            sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
+            sim.s.run_due(sim.now);
+            assert_eq!(sim.caps(), [2], "at {estimate}");
+            assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        }
+    }
+
+    #[test]
+    fn loss_or_nack_growth_steps_down_without_waiting() {
+        let note = |sim: &mut Sim, nacks: u64, loss: Option<f32>| {
+            let track = sim.tracks[0].0.clone();
+            sim.s.note_egress_loss(
+                sim.now,
+                &RECEIVER,
+                (track.1, Some(Rid::from("high"))),
+                nacks,
+                loss,
+            );
+        };
+        // 0.65 of the high layer would otherwise wait two windows.
+        let mut sim = on_high((RATES[2] as f64 * 0.65) as u64);
+        let at = sim.now;
+        note(&mut sim, 1, Some(0.0));
+        assert_eq!(sim.caps(), [2], "the first sample is the baseline");
+        note(&mut sim, 1, Some(0.005));
+        assert_eq!(sim.caps(), [2], "a loss rise under one point is not growth");
+        note(&mut sim, 2, Some(0.005));
+        assert_eq!(sim.caps(), [1]);
+        let since = sim.s.receivers[&RECEIVER].under_since.unwrap();
+        assert_eq!(at.saturating_duration_since(since), STEP_DOWN_CONFIRM);
+        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
+
+        // The loss fraction alone, with the NACK count unchanged.
+        let mut sim = on_high((RATES[2] as f64 * 0.70) as u64);
+        note(&mut sim, 4, Some(0.01));
+        note(&mut sim, 4, Some(0.01 + LOSS_GROWTH));
+        assert_eq!(sim.caps(), [1]);
+
+        // Growth while the estimate is above the traffic does not step, and
+        // it does not arm a later dip.
+        let mut sim = on_high(RATES[2] + 500_000);
+        note(&mut sim, 1, None);
+        note(&mut sim, 3, Some(0.05));
+        assert_eq!(sim.caps(), [2]);
+        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+    }
+
+    #[test]
+    fn exact_half_steps_at_once_and_just_above_half_waits() {
+        let half = (RATES[2] as f64 * STEP_DOWN_IMMEDIATE) as u64;
+        assert_eq!(half, RATES[2] / 2);
+        let sim = on_high(half);
+        assert_eq!(sim.caps(), [1]);
+        let at = sim.now;
+        // on_high estimated at `at`, which is still `now`.
+        let since = sim.s.receivers[&RECEIVER].under_since.unwrap();
+        assert_eq!(at.saturating_duration_since(since), STEP_DOWN_CONFIRM);
+
+        let mut sim = on_high(half + 1);
+        let at = sim.now;
+        assert_eq!(sim.caps(), [2], "one bit over half is not a collapse");
+        assert_eq!(sim.s.receivers[&RECEIVER].under_since, Some(at));
+        steps_on_the_second_window(&mut sim);
+
+        // Two highs, exactly half: the step is immediate, and the backdate
+        // lets the other track step on the next run without waiting.
         let mut sim = Sim::new(&[RATES, RATES]);
         sim.place(2);
-        sim.estimate(1_000_000, true);
+        let at = sim.now;
+        sim.estimate(RATES[2], true);
         assert_eq!(sim.caps(), [1, 2]);
+        let since = sim.s.receivers[&RECEIVER].under_since.unwrap();
+        assert_eq!(at.saturating_duration_since(since), STEP_DOWN_CONFIRM);
+        sim.estimate(RATES[2], true);
+        assert_eq!(sim.caps(), [1, 1]);
+
+        // One bit over half of the two highs waits.
+        let mut sim = Sim::new(&[RATES, RATES]);
+        sim.place(2);
+        sim.estimate(RATES[2] + 1, true);
+        assert_eq!(sim.caps(), [2, 2]);
+    }
+
+    #[test]
+    fn recovery_above_the_traffic_clears_the_step_down_timer() {
+        let mut sim = on_high((RATES[2] as f64 * 0.65) as u64);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_some());
+        sim.advance(RATE_WINDOW.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [2]);
+        sim.estimate(RATES[2] + 1, true);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [2]);
+    }
+
+    #[test]
+    fn no_estimate_or_zero_traffic_clears_the_timers_and_does_not_step_down() {
+        let mut sim = Sim::new(&[RATES]);
+        sim.place(2);
+        assert!(sim.s.receivers[&RECEIVER].estimate.is_none());
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        sim.advance(STEP_DOWN_CONFIRM.as_millis() as u64);
+        sim.s.run_due(sim.now);
+        assert_eq!(sim.caps(), [2]);
+
+        sim.estimate((RATES[2] as f64 * 0.65) as u64, true);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_some());
+        // The video goes silent. The next allocation sees no traffic and
+        // drops the timer, and low is not forced by a zero cost.
+        sim.advance_layers(LAYER_TIMEOUT.as_millis() as u64 + 500, &[]);
+        sim.estimate((RATES[2] as f64 * 0.65) as u64, true);
+        assert!(sim.s.receivers[&RECEIVER].under_since.is_none());
+        assert!(!sim.s.receivers[&RECEIVER].loss_bypass);
+        assert_eq!(sim.caps(), [2]);
     }
 
     #[test]

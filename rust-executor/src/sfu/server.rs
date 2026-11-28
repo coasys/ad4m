@@ -1804,6 +1804,20 @@ impl SfuServer {
                                     data_received.push((pid.clone(), payload));
                                 }
                             }
+                            Event::MediaEgressStats(stats) => {
+                                // Downlink loss and NACKs for this client.
+                                // A pipe has no receiver budget. PLIs are the
+                                // selector's own keyframe requests, not loss.
+                                if !peer.is_pipe {
+                                    layers.note_egress_loss(
+                                        Instant::now(),
+                                        pid,
+                                        (stats.mid, stats.rid),
+                                        stats.nacks,
+                                        stats.loss,
+                                    );
+                                }
+                            }
                             Event::PeerStats(stats) => {
                                 // The layer of each video track this peer receives.
                                 // One line per peer per interval: debug, not info.
@@ -2059,8 +2073,9 @@ impl SfuServer {
                     peer.rtc.bwe().set_desired_bitrate(Bitrate::bps(bps));
                 }
             }
-            // Wake for the earliest pending upgrade: the estimator is silent
-            // on a steady link, so no event would run it.
+            // Wake for the earliest pending upgrade or step-down sample:
+            // the estimator is silent on a steady link, so no event would
+            // run it.
             if let Some(wake) = layers.next_wake() {
                 earliest_timeout = earliest_timeout.min(wake);
             }
