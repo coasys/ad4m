@@ -99,9 +99,13 @@ pub(super) async fn resolve_projections(
             }
             None => {
                 log::warn!(
-                    "IncludeProjection '{}': relation '{}' not found in shape — skipping",
+                    "IncludeProjection '{}': relation '{}' not found in shape class={} — skipping",
                     key,
-                    proj.from
+                    proj.from,
+                    crate::call_diag::field_value(&crate::call_diag::model::bounded(
+                        &crate::perspectives::shacl_parser::class_name_of(&shape.target_class),
+                        512
+                    ))
                 );
                 continue;
             }

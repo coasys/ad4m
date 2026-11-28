@@ -56,6 +56,18 @@ export interface Remote {
   height: number;
 }
 
+/** Payload bytes and RTP packets sent. */
+export interface Sent {
+  bytes: number;
+  packets: number;
+}
+
+/** What a participant's connections sent: its audio, and each video simulcast layer by rid. */
+export interface SentMedia {
+  audio: Sent;
+  video: Record<string, Sent>;
+}
+
 export interface Snapshot {
   joined: boolean;
   state: string;
@@ -79,6 +91,8 @@ export interface Snapshot {
   recoveries: number;
   /** The remote address (`ip:port`) of each connection's selected candidate pair: where media goes. */
   selectedRemotes: string[];
+  /** What this participant's connections sent since the start (outbound-rtp stats). */
+  sent: SentMedia;
   /**
    * The longest this participant's process stood still in the last 2 s, the
    * current pause included: meanwhile it sent no tone and took in no audio.

@@ -23,7 +23,7 @@
  * `E2E_KNOWN_FAILURES=1` (exactly `1`) runs them anyway, so a branch can show
  * they pass; one that passes stays a pass and warns to remove its entry:
  *
- *   E2E_KNOWN_FAILURES=1 E2E_ONLY=e26,e28,e29 pnpm run test-sfu-e2e
+ *   E2E_KNOWN_FAILURES=1 E2E_ONLY=e27,e29,e30 pnpm run test-sfu-e2e
  */
 
 export { TcpShaper, UdpRelay, seeded } from "./shaper.js";
@@ -41,9 +41,9 @@ export type { FaultWindow, RunCheckOptions } from "./checks.js";
  * unless `E2E_KNOWN_FAILURES=1`. Remove an entry when its row passes.
  */
 export const FAILS_ON_DEV: Record<string, string> = {
-  e26: "a lost sfu.callAnswerServerOffer request leaves carol without the offer's media until the 30 s RPC timeout rebuilds her call",
-  e28: "a lost reply to an applied sfu.callAnswerServerOffer times out after 30 s and rebuilds carol's call (participant-left for everyone)",
-  e29: "dev sends no sfu.callResume, so no resume reply brings carol the roster and offer she missed while her socket was down",
+  e27: "a lost sfu.callAnswerServerOffer request leaves carol without the offer's media until the 30 s RPC timeout rebuilds her call",
+  e29: "a lost reply to an applied sfu.callAnswerServerOffer times out after 30 s and rebuilds carol's call (participant-left for everyone)",
+  e30: "dev sends no sfu.callResume, so no resume reply brings carol the roster and offer she missed while her socket was down",
 };
 
 /** The env var that runs the `FAILS_ON_DEV` rows instead of skipping them. */

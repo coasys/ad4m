@@ -18,7 +18,7 @@ import { AIClient } from "../ai/AIClient";
 
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { AllInstancesResult } from "../model/types";
-import { LiveQuery, LiveQueryStatus, Subscribed } from "./LiveQuery";
+import { LiveOptions, LiveQuery, SparqlRows } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AgentMessage } from "../generated/api/AgentMessage";
 import type { AgentReply } from "../generated/api/AgentReply";
@@ -34,8 +34,6 @@ import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
 import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
-
-type QueryCallback = (result: AllInstancesResult) => void;
 
 /** A class registered in a perspective, as {@link PerspectiveProxy.shapes} reads it. */
 export interface RegisteredShape {
@@ -57,110 +55,6 @@ function extractNamespaceFromUri(uri: string): string {
     return uri;
 }
 
-
-/** A live SPARQL or model query with its latest result.
- *
- * `subscribe()` opens the query and resolves once the first result is in;
- * `onResult()` callbacks then get every later result. The executor sends
- * only changes; `LiveQuery` applies them, recovers from a missed update and
- * re-opens the query after a reconnect. Call `dispose()` when done.
- *
- * ```typescript
- * const subscription = await perspective.subscribeQuery("SELECT ?s WHERE { ?s ?p ?o }");
- * const remove = subscription.onResult(result => console.log(result));
- * subscription.dispose();
- * ```
- */
-export class QuerySubscriptionProxy {
-    #live: LiveQuery;
-    #callbacks = new Set<QueryCallback>();
-    #initialized: Promise<boolean>;
-    #initResolve?: (value: boolean) => void;
-    #initReject?: (reason?: any) => void;
-
-    /** With `className`, `query` is a model query (JSON) over that class or
-     *  union of classes, opened with `modelSubscribe`; results are
-     *  `{ instances, totalCount }`. Without it, `query` is SPARQL. */
-    constructor(uuid: string, query: string, client: PerspectiveClient, className?: string | string[]) {
-        const open = className === undefined
-            ? (signal: AbortSignal) => client.subscribeQuery(uuid, query, { signal })
-            : (signal: AbortSignal) => client.modelSubscribe(uuid, className, query, { signal });
-        this.#live = new LiveQuery(client, uuid, open, result => this.#deliver(result));
-        this.#initialized = new Promise<boolean>((resolve, reject) => {
-            this.#initResolve = resolve;
-            this.#initReject = reject;
-        });
-        // `subscribe()` throws the same error, so a caller who never reads
-        // `initialized` must not get an unhandled rejection from it.
-        this.#initialized.catch(() => {});
-    }
-
-    /** Open the query; resolves with the first result delivered. */
-    async subscribe() {
-        try {
-            this.#deliver(await this.#live.start());
-        } catch (error) {
-            this.#initReject?.(error);
-            this.#initResolve = this.#initReject = undefined;
-            throw error;
-        }
-    }
-
-    /** The executor's id for this subscription. */
-    get id(): string {
-        return this.#live.id;
-    }
-
-    /** Resolves once the first result has arrived. */
-    get initialized(): Promise<boolean> {
-        return this.#initialized;
-    }
-
-    /** The latest result. */
-    get result(): AllInstancesResult {
-        return this.#live.result;
-    }
-
-    /** Call `callback` with every later result. Returns a remover. */
-    onResult(callback: QueryCallback): () => void {
-        this.#callbacks.add(callback);
-        return () => this.#callbacks.delete(callback);
-    }
-
-    /** Whether the query lost its subscription (a reconnect, a failed
-     *  resync), could not open it again yet and is retrying: `result` is then
-     *  not live. */
-    get reopening(): boolean {
-        return this.#live.reopening;
-    }
-
-    /** Call `listener` on each failed re-open of the subscription and when a
-     *  re-open succeeds after one failed (see {@link LiveQueryStatus}).
-     *  Returns a remover. */
-    onStatus(listener: (status: LiveQueryStatus) => void): () => void {
-        return this.#live.onStatus(listener);
-    }
-
-    #deliver(result: AllInstancesResult) {
-        this.#initResolve?.(true);
-        this.#initResolve = this.#initReject = undefined;
-        for (const callback of this.#callbacks) {
-            try {
-                callback(result);
-            } catch (e) {
-                console.error('Error in query subscription callback:', e);
-            }
-        }
-    }
-
-    /** End the subscription on the executor and drop all callbacks. With
-     *  `cancelOpening`, a `subscribe()` still waiting on the executor is
-     *  cancelled too, and rejects. */
-    dispose(options: { cancelOpening?: boolean } = {}) {
-        this.#live.dispose(options);
-        this.#callbacks.clear();
-    }
-}
 
 /** Link status argument. The executor accepts either case and returns links
  *  with the upper-case form (`LinkExpression.status`). */
@@ -232,7 +126,7 @@ export class PerspectiveProxy {
     #handle: PerspectiveHandle
     #client: PerspectiveClient
 
-    /** @internal Exposed for ModelQueryBuilder subscription management */
+    /** @internal The client live queries open their subscriptions through. */
     get client(): PerspectiveClient { return this.#client; }
 
     /** Releases of the handlers `on()` registered and has not released yet. */
@@ -559,16 +453,24 @@ export class PerspectiveProxy {
      * hash over their content, and a receipt for the run can only speak for
      * exactly these instances, as they stood at completion. Naming outputs
      * for a non-terminal state is refused.
+     *
+     * A refused move rejects with an `RpcError` (status 409). Its `data` is a
+     * {@link FlowRefusal}: branch on `data.kind`. Any other failure is status
+     * 500 with no `data`.
      */
     async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
         return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
     }
 
+    /** Co-sign a proposal. A refusal rejects like {@link PerspectiveProxy.proposeFlowTransition}. */
     async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
         return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
     }
 
-    /** Withdraw our own links from a proposal; resolves to how many went. */
+    /**
+     * Withdraw our own links from a proposal; resolves to how many went.
+     * A refusal rejects like {@link PerspectiveProxy.proposeFlowTransition}.
+     */
     async rejectFlowProposal(proposalUri: string): Promise<number> {
         return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
     }
@@ -718,9 +620,10 @@ export class PerspectiveProxy {
      *   query over their union, whose rows carry `__subjectClass` and
      *   `__subjectClasses` (#1238)
      * @param queryJson - Structured query as JSON string
-     * @returns Object with `instances` array, and `totalCount` when the query sets `count: true`
+     * @returns Object with `instances` array, `totalCount` when the query sets `count: true`,
+     *   and `nextCursor` when the query sends `after` and a full page came back
      */
-    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number }> {
+    async modelQuery(className: string | string[], queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount?: number, nextCursor?: string }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
@@ -779,20 +682,6 @@ export class PerspectiveProxy {
         return await this.#client.evaluateGetters(
             this.#handle.uuid, className, instanceIds, propertyNames,
         );
-    }
-
-    /**
-     * Open a live model query on the executor. Later changes arrive as
-     * updates; `LiveQuery` (or `ModelQueryBuilder.subscribe()`) applies them.
-     * The subscription ends with `disposeQuerySubscription()` or when the
-     * socket closes.
-     *
-     * @param className - The model class name, or several (same as modelQuery)
-     * @param queryJson - JSON-serialized query parameters (same as modelQuery)
-     * @returns `subscriptionId`, initial `result` and `revision` (0)
-     */
-    async modelSubscribe(className: string | string[], queryJson: string): Promise<Subscribed> {
-        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 
     /**
@@ -1050,8 +939,7 @@ export class PerspectiveProxy {
      * ```
      */
     async getSingleTarget(query: LinkQuery): Promise<string|void> {
-        delete query.target
-        const foundLinks = await this.get(query)
+        const foundLinks = await this.get(new LinkQuery({ ...query, target: undefined }))
         if(foundLinks.length)
             return foundLinks[0].data.target
         else
@@ -1146,10 +1034,12 @@ export class PerspectiveProxy {
      * ```
      *
      * A class whose stored shape already is the given one is left alone
-     * (`unchanged`): registering on every start writes nothing. The others
-     * are rewritten in one diff (`written`), which keeps links other apps
-     * put on the class. Both lists name classes by target class IRI.
-     * Answers once the executor reads the new shapes.
+     * (`unchanged`): registering on every start writes nothing, and the
+     * executor answers an all-unchanged call from its cached registry
+     * without taking the write mutex. The others are rewritten in one diff
+     * (`written`), which keeps links other apps put on the class. Both
+     * lists name classes by target class IRI. Answers once the executor
+     * reads the new shapes.
      *
      * Rejects, writing nothing, when two shapes name one class or share a
      * shape URI, or when another class holds a shape URI given here.
@@ -1601,20 +1491,30 @@ export class PerspectiveProxy {
         return this.#client.aiClient
     }
 
-    /** Live SPARQL query: resolves once the first result is in.
-     *  Call `dispose()` on the returned proxy when done. The executor
-     *  refuses a Prolog query (400): Prolog live queries are not supported. */
-    async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
-        const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
-        try {
-            await subscription.subscribe();
-        } catch (e) {
-            // Nobody gets the proxy, so nobody can dispose it: left as is, it
-            // would re-open on every reconnect and retry for good (#1595).
-            subscription.dispose({ cancelOpening: true });
-            throw e;
-        }
-        return subscription;
+    /** A live SPARQL query. The first snapshot is the query's current rows;
+     *  later ones follow each change. The handle opens at once: `first`
+     *  rejects when the open fails (the executor refuses a Prolog query with
+     *  a 400: Prolog live queries are not supported). Call `dispose()` when
+     *  done.
+     *
+     *  An ASK query gives a boolean, not rows: use `liveSparql<boolean>`.
+     *
+     *  ```typescript
+     *  const live = perspective.liveSparql("SELECT ?s WHERE { ?s ?p ?o }");
+     *  const stop = live.subscribe(({ data, initial }) => console.log(data, initial));
+     *  const rows = await live.first;
+     *  // later
+     *  stop();
+     *  live.dispose();
+     *  ```
+     */
+    liveSparql<T = SparqlRows>(sparql: string, options: LiveOptions = {}): LiveQuery<T> {
+        return new LiveQuery<T>(
+            this.#client, this.uuid,
+            signal => this.#client.subscribe(this.uuid, { sparql }, { signal, timeoutMs: options.timeoutMs }),
+            // A copy: LiveQuery keeps the raw result to apply later diffs to.
+            rows => structuredClone(rows),
+        );
     }
 
 }

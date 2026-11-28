@@ -5,7 +5,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 ## How It Works
 
 1. The plugin's `ad4m-waker` service connects to the AD4M executor's WebSocket event endpoint
-2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin creates a `QuerySubscriptionProxy` with a live model query (for mentions, one over the built-in Mentioning and one over the built-in TextContent; for children, one over the built-in Container)
+2. When you call `subscribe_to_mentions` or `subscribe_to_children`, the plugin opens a `LiveQuery` (`perspective.subscribe`) with a live model query (for mentions, one over the built-in Mentioning and one over the built-in TextContent; for children, one over the built-in Container)
 3. When query results change, the plugin debounces and POSTs to OpenClaw's `/hooks/wake` endpoint
 4. Your agent wakes up with context about what changed and processes the new data via MCP tools
 
@@ -57,6 +57,8 @@ The `Mentioned items` section lists each item that triggered the wake:
 **The item is not necessarily a message.** The subscription holds two model queries over built-in abstract classes, and an item wakes you through either, whatever the space calls its classes. Mentioning `{ mentions }`: any record of a class with a relation named or aliased `mentions` that links your DID, under whatever predicate the app uses; the record's text plays no part, so you are woken whatever label the writer's app gave you, even "@Datai" where the label runs into the next word, and for a record that has no text at all, such as the root of a post whose words are in its child blocks. Or TextContent `{ text }`: a record of a class with a text property (named or aliased `text`) whose text names one of your profile names or your DID as a whole word ("data" in "hi Data!", not in "metadata"; HTML markup is ignored, and a mention chip's DID attribute counts), which covers spoken lines and apps that write no mention link. An item both find wakes you once, through the query that reports it first. Links you authored yourself never match, so your own reply naming or mentioning you does not wake you, and neither does a mention link whose signature does not verify. A mention link on a node no class describes is not read. So the address you are handed is a post, a line in a feed, or a record of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
 An item can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example).
+
+When you reply, mention whoever you answer: their DID in the reply's `mentions` relation (and a mention mark over `@Name` when the class keeps marks). See "Tag everyone you address" in SKILL.md.
 
 ### Reading the context around a mention
 

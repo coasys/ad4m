@@ -138,8 +138,7 @@ impl RegisteredPerspective {
         crate::perspectives::get_perspective(&self.uuid)
             .expect("registered perspective")
             .persisted
-            .lock()
-            .await
+            .load()
             .owners
             .clone()
     }

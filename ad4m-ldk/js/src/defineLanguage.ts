@@ -82,6 +82,54 @@ export interface LanguageSourceCapability {
     getSource(address: Address): Promise<string>;
 }
 
+export interface MountShapeEntry { name: string; shape: object }
+export interface MountShapes { version: string; shapes: MountShapeEntry[] }
+export interface MountEntry { class: string; address: Address; data: Record<string, unknown> }
+export interface MountSnapshot { entries: MountEntry[] }
+export interface MountCapability {
+    shapes(): MountShapes | Promise<MountShapes>;
+    snapshot(): MountSnapshot | Promise<MountSnapshot>;
+}
+
+/**
+ * A class `mount.classes` generates a shape for. The client SDK's `@Model`
+ * decorator (`@coasys/ad4m/model`) attaches `generateSHACL()` to the
+ * constructor; a class declared without the SDK can provide the same
+ * method by hand. `{ name, shape }` is what `generateSHACL()` returns.
+ */
+export interface MountClass {
+    new (...args: any[]): any;
+    /** The mounted name — `@Model({ name })` sets it on the constructor.
+     *  `generateSHACL().name` wins when both exist. */
+    className?: string;
+    generateSHACL?(): { name: string; shape: { toJSON(): object } };
+}
+
+/**
+ * The `mount.classes` form: describe the mounted classes with the SDK's
+ * model decorators and let `mountShapes()` build itself from them.
+ * `mountShapes()` produces `{ version, shapes: [{ name, shape }] }` — the
+ * same wire form `mount.shapes` writes by hand.
+ */
+export interface MountClassesSpec {
+    /** The classes this language mounts. */
+    classes: MountClass[];
+    /**
+     * The `mountShapes()` format version — the mount engine re-installs
+     * when it changes. A thunk when the version moves at runtime.
+     */
+    version: string | (() => string | Promise<string>);
+    /** The records to show in the mounted perspective. */
+    snapshot(): MountSnapshot | Promise<MountSnapshot>;
+    /**
+     * How the `{language}` placeholder in a call action's `source`/`target`
+     * resolves to this language's own address. Defaults to the
+     * `languageAddress()` host call — override only where the host import
+     * is unavailable (e.g. tests outside a language runtime).
+     */
+    languageAddress?: string | (() => string | Promise<string>);
+}
+
 // ----- Top-level language spec -----
 
 export interface LanguageSpec {
@@ -113,6 +161,131 @@ export interface LanguageSpec {
     /** Holochain signal handler (spec §8). The runtime routes Holochain
      * signals to this export based on a DnaHash → instance map. */
     handleHolochainSignal?(signal: unknown): void | Promise<void>;
+
+    /** Mount capability: shapes and records shown in a perspective (Acorn spike). Export both or neither. */
+    mount?: MountCapability | MountClassesSpec;
+}
+
+/** A link action the placeholder applies to. Other actions stay as written. */
+function isCallAction(action: unknown): action is { source?: unknown; target?: unknown } {
+    return !!action && typeof action === "object" && (action as { action?: unknown }).action === "call";
+}
+
+/**
+ * Replace every `{language}` in a call action's `source` and `target`
+ * with the language's own address. A class is decorated before it knows
+ * which language mounts it, so `source: "{language}://class/X"` defers the
+ * address to `mountShapes()` time. An action whose `action` is not `"call"`
+ * is returned unchanged, including literal `{language}` text in `source` or
+ * `target`. Returns a new shape; the `generateSHACL()` output (which callers
+ * may memoize) is never mutated.
+ */
+export function resolveMountCallSources<T>(shape: T, languageAddress: string): T {
+    const sub = (v: unknown) =>
+        typeof v === "string" && v.includes("{language}")
+            ? v.replaceAll("{language}", languageAddress)
+            : v;
+    const actions = (list: unknown) =>
+        Array.isArray(list)
+            ? list.map((a) => (isCallAction(a)
+                ? { ...a, source: sub(a.source), target: sub(a.target) }
+                : a))
+            : list;
+    const s = shape as any;
+    if (!s || typeof s !== "object") return shape;
+    return {
+        ...s,
+        ...(s.constructor_actions && { constructor_actions: actions(s.constructor_actions) }),
+        ...(s.destructor_actions && { destructor_actions: actions(s.destructor_actions) }),
+        ...(Array.isArray(s.properties) && {
+            properties: s.properties.map((p: any) => (p && typeof p === "object"
+                ? {
+                    ...p,
+                    ...(p.setter && { setter: actions(p.setter) }),
+                    ...(p.adder && { adder: actions(p.adder) }),
+                    ...(p.remover && { remover: actions(p.remover) }),
+                }
+                : p)),
+        }),
+    };
+}
+
+function textHasLanguage(value: unknown): boolean {
+    return typeof value === "string" && value.includes("{language}");
+}
+
+function actionHasLanguage(action: unknown): boolean {
+    if (!isCallAction(action)) return false;
+    return textHasLanguage(action.source) || textHasLanguage(action.target);
+}
+
+function listHasLanguage(list: unknown): boolean {
+    return Array.isArray(list) && list.some(actionHasLanguage);
+}
+
+/**
+ * Whether a call action's `source` or `target` still contains `{language}`.
+ * Only the lists `resolveMountCallSources` rewrites are checked — constructor,
+ * destructor, setter, adder and remover. Other shape text (an
+ * `interpretation_hint`, a path, a `has_value`) is left alone and must not
+ * force a `languageAddress()` call.
+ */
+function usesLanguagePlaceholder(shape: object): boolean {
+    const s = shape as {
+        constructor_actions?: unknown;
+        destructor_actions?: unknown;
+        properties?: unknown;
+    };
+    if (listHasLanguage(s.constructor_actions) || listHasLanguage(s.destructor_actions)) return true;
+    if (!Array.isArray(s.properties)) return false;
+    return s.properties.some((p) => {
+        if (!p || typeof p !== "object") return false;
+        const prop = p as { setter?: unknown; adder?: unknown; remover?: unknown };
+        return listHasLanguage(prop.setter) || listHasLanguage(prop.adder) || listHasLanguage(prop.remover);
+    });
+}
+
+/**
+ * The node-shape URI the executor stores when `node_shape_uri` is absent.
+ *
+ * `rust-executor/src/languages/mount_types.rs` only names the mount envelope.
+ * Registration (`perspective_instance::shapes::register_shapes`) calls
+ * `shape_links(shape, class_name_of(target_class))`, and with no
+ * `node_shape_uri` that builds `{extract_namespace(target_class)}{class_name}Shape`
+ * (`shacl_parser::shape_links`). `class_name_of` is the text after the
+ * rightmost `#`, `:` or `/`. These two splits match
+ * `shacl_parser::extract_namespace` and `extract_local_name` for the URIs
+ * that parser accepts. A target class that parser cannot namespace (no
+ * `://` and no `#`) yields `undefined` — the executor refuses the shape,
+ * and a parent link is left as declared rather than invented.
+ */
+function derivedMountShapeUri(targetClass: string): string | undefined {
+    const schemePos = targetClass.indexOf("://");
+    let namespace: string | undefined;
+    if (schemePos !== -1) {
+        const after = targetClass.slice(schemePos + 3);
+        if (!after.includes("/") && !after.includes("#")) {
+            namespace = targetClass.slice(0, schemePos + 3);
+        }
+    }
+    if (namespace === undefined) {
+        const hashPos = targetClass.lastIndexOf("#");
+        if (hashPos !== -1) namespace = targetClass.slice(0, hashPos + 1);
+    }
+    if (namespace === undefined && schemePos !== -1) {
+        const after = targetClass.slice(schemePos + 3);
+        const lastSlash = after.lastIndexOf("/");
+        if (lastSlash !== -1) namespace = targetClass.slice(0, schemePos + 3 + lastSlash + 1);
+    }
+    if (namespace === undefined) return undefined;
+    const localAt = Math.max(
+        targetClass.lastIndexOf("#"),
+        targetClass.lastIndexOf(":"),
+        targetClass.lastIndexOf("/"),
+    );
+    const local = localAt < 0 ? targetClass : targetClass.slice(localAt + 1);
+    if (!local) return undefined;
+    return `${namespace}${local}Shape`;
 }
 
 /**
@@ -188,6 +361,10 @@ export interface FlatLanguageExports {
 
     // Holochain signal
     handleHolochainSignal?(signal: unknown): void | Promise<void>;
+
+    // Mount
+    mountShapes?(): MountShapes | Promise<MountShapes>;
+    mountSnapshot?(): MountSnapshot | Promise<MountSnapshot>;
 }
 
 /**
@@ -307,6 +484,82 @@ export function defineLanguage(spec: LanguageSpec): FlatLanguageExports {
 
     if (spec.handleHolochainSignal) {
         out.handleHolochainSignal = spec.handleHolochainSignal.bind(spec);
+    }
+
+    if (spec.mount) {
+        const m = spec.mount;
+        if ("classes" in m) {
+            // `mount.classes` form: `mountShapes()` builds itself from each
+            // class's `generateSHACL()`; `{language}` in call action
+            // sources resolves to the language's own address (the
+            // `languageAddress()` host call unless overridden).
+            const resolveAddress = async (): Promise<string> => {
+                const la = m.languageAddress;
+                // `la()` would drop the mount receiver (`languageAddress() { return this.x }`).
+                if (typeof la === "function") return la.call(m);
+                if (la) return la;
+                // Lazy so that loading the LDK outside a language runtime
+                // (unit tests in Node) never resolves `ad4m:host`; a file
+                // specifier keeps the import intact under the language
+                // bundler — a bare `import("ad4m:host")` would degrade to a
+                // `require()` call the runtime cannot serve.
+                const { languageAddress } = await import("./imports.js");
+                return languageAddress();
+            };
+            out.mountShapes = async () => {
+                const version = typeof m.version === "function" ? await m.version() : m.version;
+                const shapes: MountShapeEntry[] = [];
+                // Declared `node_shape_uri` (`{namespace}{name}Shape`) → the URI
+                // the executor derives from `target_class` once that field is
+                // dropped. Parent links are rewritten from the map after every
+                // class is seen, so a child listed before its parent still matches.
+                const declaredToDerived = new Map<string, string>();
+                let address: string | undefined;
+                for (const cls of m.classes) {
+                    const gen = cls.generateSHACL?.();
+                    if (!gen?.shape?.toJSON) {
+                        throw new Error(
+                            `mount class ${cls.className ?? cls.name} has no generateSHACL() — ` +
+                            `decorate it with @Model (from "@coasys/ad4m/model") or provide one`
+                        );
+                    }
+                    const name = gen.name ?? cls.className ?? cls.name;
+                    const shape = gen.shape.toJSON() as Record<string, unknown>;
+                    const declared = shape.node_shape_uri;
+                    const targetClass = shape.target_class;
+                    // A mount shape keeps no node_shape_uri: the executor's
+                    // shape parser derives `{ns}{Class}Shape` from
+                    // `target_class` when it is absent — the form
+                    // hand-written mountShapes() already use.
+                    delete shape.node_shape_uri;
+                    if (typeof declared === "string" && typeof targetClass === "string") {
+                        const derived = derivedMountShapeUri(targetClass);
+                        if (derived) declaredToDerived.set(declared, derived);
+                    }
+                    if (usesLanguagePlaceholder(shape) && address === undefined) {
+                        address = await resolveAddress();
+                    }
+                    shapes.push({
+                        name,
+                        shape: address === undefined ? shape : resolveMountCallSources(shape, address),
+                    });
+                }
+                for (const entry of shapes) {
+                    const shape = entry.shape as Record<string, unknown>;
+                    if (!Array.isArray(shape.parent_shapes)) continue;
+                    shape.parent_shapes = shape.parent_shapes.map((uri) =>
+                        typeof uri === "string" && declaredToDerived.has(uri)
+                            ? declaredToDerived.get(uri)
+                            : uri
+                    );
+                }
+                return { version, shapes };
+            };
+            out.mountSnapshot = m.snapshot.bind(m);
+        } else {
+            out.mountShapes = m.shapes.bind(m);
+            out.mountSnapshot = m.snapshot.bind(m);
+        }
     }
 
     return out;

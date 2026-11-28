@@ -7,6 +7,7 @@ import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuAnswerResult,
     SfuCallRenegotiationOffer,
     SfuCascadeStatus,
     SfuConfig,
@@ -14,6 +15,7 @@ import type {
     SfuMigrateEvent,
     SfuParticipantQualityPreference,
     SfuQualityPreference,
+    SfuResumeResult,
     SfuRoomInfo,
     SfuRoomRoster,
     SfuSessionReplaced,
@@ -108,23 +110,27 @@ export class NeighbourhoodClient {
         }
     }
 
-    async subscribeToSignals(perspectiveUUID: string): Promise<void> {
+    subscribeToSignals(perspectiveUUID: string): void {
         const unsub = this.#apiClient.on(
             'signal',
             (event) => this.dispatchSignal(perspectiveUUID, PerspectiveExpression.fromWire(event.signal)),
             { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
-        await this.#apiClient.watchApplied()
     }
 
-    async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
+    /**
+     * Call `handler` with every signal of the neighbourhood. The executor
+     * applies the subscription before any call this client sends next; a
+     * signal another agent sent earlier may be missed.
+     */
+    addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): void {
         let handlersForPerspective = this.#signalHandlers.get(perspectiveUUID)
         if (!handlersForPerspective) {
             handlersForPerspective = []
             this.#signalHandlers.set(perspectiveUUID, handlersForPerspective)
             handlersForPerspective.push(handler)
-            await this.subscribeToSignals(perspectiveUUID)
+            this.subscribeToSignals(perspectiveUUID)
         } else {
             handlersForPerspective.push(handler)
         }
@@ -211,26 +217,37 @@ export class NeighbourhoodClient {
         })
     }
 
+    /** Answer a server offer. `offerId` is the id the
+     *  `sfu-call-renegotiation-offer` carried; the executor applies the
+     *  answer to that offer and replies whether it took it: `{ accepted:
+     *  true }` (also for a repeat of an answer already accepted), or
+     *  `{ accepted: false, reason }` (`stale`, `no-pending`,
+     *  `unknown-session`). A refusal is this value, not an RPC error.
+     *  Sent urgent: a socket that took it and went silent must be found
+     *  inside the offer's window, not after it. */
     async sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
         participantId: string,
+        offerId: string,
         sdpAnswer: string,
-    ): Promise<boolean> {
+    ): Promise<SfuAnswerResult> {
         return this.#apiClient.call("sfu.callAnswerServerOffer", {
             neighbourhoodUrl,
             roomName,
             participantId,
+            offerId,
             sdpAnswer,
-        })
+        }, { urgent: true })
     }
 
     /** Ask the SFU to restart ICE on the session `participantId` (this
      *  agent's, as its join returned it; any other is refused). The offer
      *  arrives as an `sfu-call-renegotiation-offer` event for that session;
-     *  answer it with {@link sfuCallAnswerServerOffer}. */
+     *  answer it with {@link sfuCallAnswerServerOffer}. Sent urgent: a
+     *  dead socket holding it must be found inside the restart window. */
     async sfuCallRestartIce(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<boolean> {
-        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId })
+        return this.#apiClient.call("sfu.callRestartIce", { neighbourhoodUrl, roomName, participantId }, { urgent: true })
     }
 
     /** Fires after a network change, once the client's socket is back on
@@ -239,10 +256,20 @@ export class NeighbourhoodClient {
         return this.#apiClient.onNetworkChange(callback)
     }
 
-    /** Check the client's socket now: one that says nothing within a
-     *  deadline is treated as a network change. See {@link ApiClient.checkConnection}. */
-    checkConnection(): void {
-        this.#apiClient.checkConnection()
+    /** Ask the SFU for the session `participantId`'s state, after this
+     *  client's socket came back: `{ listed: false }` when the room or the
+     *  session is gone, `{ listed: true, offer?, roster? }` with the pending
+     *  offer and the room's sessions when it is listed. A session of another
+     *  agent is 403; an event loop that does not answer is 408. Sent
+     *  urgent: the reply must land inside the restart window it shares
+     *  with the resends it follows. */
+    async sfuCallResume(neighbourhoodUrl: string, roomName: string, participantId: string): Promise<SfuResumeResult> {
+        return this.#apiClient.call("sfu.callResume", { neighbourhoodUrl, roomName, participantId }, { urgent: true })
+    }
+
+    /** Fires after the client's socket opened again after a drop. See {@link ApiClient.onReconnect}. */
+    onReconnect(callback: () => void): () => void {
+        return this.#apiClient.onReconnect(callback)
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
@@ -366,6 +393,7 @@ export class NeighbourhoodClient {
             callback({
                 targetDid: event.targetDid,
                 participantId: event.participantId,
+                offerId: event.offerId,
                 neighbourhoodUrl: event.neighbourhoodUrl,
                 roomName: event.roomName,
                 sdpOffer: event.sdpOffer,

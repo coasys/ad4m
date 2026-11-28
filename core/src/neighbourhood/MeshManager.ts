@@ -190,19 +190,12 @@ export interface SignallingChannel {
      * "the message has not gone yet" — see {@link MeshManager.outstanding}.
      */
     onPublishResult?(cb: (result: { ok: boolean; ms: number }) => void): () => void
-    /**
-     * Settles once messages published from now on reach `onMessage`.
-     * Optional: a transport that delivers from the moment `onMessage`
-     * returns has nothing to wait for. A peer told about this one before it
-     * listens would offer into the void until a repair resends.
-     */
-    listening?(): Promise<void>
 }
 
 /** Minimal telepresence surface the channel bridge needs. */
 export interface TelepresenceProxy {
     sendBroadcastU(status: PerspectiveUnsignedInput): Promise<boolean>
-    addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void>
+    addSignalHandler(handler: (payload: PerspectiveExpression) => void): void
     removeSignalHandler(handler: (payload: PerspectiveExpression) => void): void
 }
 
@@ -255,7 +248,6 @@ export function createTelepresenceChannel(
 ): SignallingChannel {
     const self = meshPeerId(selfDid, selfDevice)
     const resultListeners = new Set<(result: { ok: boolean; ms: number }) => void>()
-    let subscribed: Promise<void> = Promise.resolve()
     let warnedNoDevice = false
     const report = (result: { ok: boolean; ms: number }) => {
         for (const cb of resultListeners) {
@@ -339,14 +331,10 @@ export function createTelepresenceChannel(
                 cb(from, message)
             }
 
-            subscribed = proxy.addSignalHandler(handler).catch((err) => {
-                console.warn("mesh: signal handler registration failed — inbound traffic will get missed:", err)
-            })
+            proxy.addSignalHandler(handler)
 
             return () => proxy.removeSignalHandler(handler)
         },
-
-        listening: () => subscribed,
 
         onPublishResult(cb) {
             resultListeners.add(cb)
@@ -402,10 +390,6 @@ export interface MeshManagerOptions {
     /** Called after a network change (see `ApiClient.onNetworkChange`): every
      *  pair restarts ICE then, rather than waiting for each to notice. */
     onNetworkChange?: (callback: () => void) => () => void
-    /** Called when a pair goes disconnected: checks the socket the signals
-     *  go over now (see `ApiClient.checkConnection`). A dead one is redialled
-     *  and `onNetworkChange` restarts every pair. */
-    checkConnection?: () => void
 }
 
 /** Public STUN, and no TURN. Two servers, because ICE queries them in parallel. */
@@ -570,7 +554,6 @@ export class MeshManager {
     private renegotiationRepairs: Map<string, number> = new Map()
     private onNetworkChange: MeshManagerOptions["onNetworkChange"]
     private unwatchNetwork: (() => void) | null = null
-    private checkConnection: MeshManagerOptions["checkConnection"]
 
     constructor(options: MeshManagerOptions) {
         this.channel = options.channel
@@ -587,7 +570,6 @@ export class MeshManager {
         this.now = options.now ?? (() => Date.now())
         this.sweepMs = options.sweepMs ?? SWEEP_INTERVAL_MS
         this.onNetworkChange = options.onNetworkChange
-        this.checkConnection = options.checkConnection
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -687,10 +669,9 @@ export class MeshManager {
 
             this.enqueue(from, slot, message)
         })
-        // A session announces itself once `join` returns; peers offer at once.
-        await this.channel.listening?.()
-        // Left or destroyed while the channel came up: start nothing.
-        if (this.closed) return
+        // A session announces itself once `join` returns; peers offer at once. A peer's offer
+        // reaches the handler: the signal subscription is on the wire ahead of the announce, on
+        // the same socket, and the executor applies it before it reads the announce's frame.
 
         /*
          * Spend the transport's first-send cost on something that does not
@@ -1044,7 +1025,6 @@ export class MeshManager {
             }
             if (state === "disconnected" && !slot.disconnectedAt) {
                 slot.disconnectedAt = this.now()
-                this.checkConnection?.()
             }
             if (state === "connected" || state === "failed") slot.disconnectedAt = 0
             this.emit("peer-state", peerId, state)

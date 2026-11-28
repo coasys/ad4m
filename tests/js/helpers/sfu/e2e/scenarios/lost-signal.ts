@@ -1,5 +1,5 @@
 /**
- * The shape of the lost-signal rows (e26, e27, e28): one message of the
+ * The shape of the lost-signal rows (e27, e28, e29): one message of the
  * renegotiation dave's join starts for carol goes missing, and the call must
  * carry on as if it had not.
  *

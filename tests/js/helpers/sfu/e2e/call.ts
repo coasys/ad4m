@@ -248,7 +248,11 @@ export class Call {
     }, among);
   }
 
-  /** Everyone else sees `name`'s video arriving now, at `size`. */
+  /**
+   * Everyone else sees `name`'s video arriving now, at `size` or one of its
+   * simulcast layers (`size` halved or quartered): each receiver's bandwidth
+   * picks the layer, and e9 and e24 test that choice.
+   */
   seesFrom(name: string, size: Size): Check {
     return (snapshots) => {
       const problems: string[] = [];
@@ -256,8 +260,8 @@ export class Call {
         if (me === name) continue;
         const remote = snapshot.remotes[this.did(name)];
         if (!remote || remote.videoRecent === 0) problems.push(`${me} sees nothing from ${name}`);
-        else if (remote.width !== size.width || remote.height !== size.height) {
-          problems.push(`${me} sees ${name} at ${remote.width}x${remote.height}, expected ${size.width}x${size.height}`);
+        else if (![1, 2, 4].some((d) => remote.width === size.width / d && remote.height === size.height / d)) {
+          problems.push(`${me} sees ${name} at ${remote.width}x${remote.height}, expected ${size.width}x${size.height} or a layer of it`);
         }
       }
       return problems;

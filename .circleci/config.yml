@@ -14,6 +14,14 @@ parameters:
   we-ref:
     type: string
     default: dev
+  # The fingerprint (SHA256:... or MD5 aa:bb:...) of the write deploy key for
+  # coasys/ad4m-wind-tunnel, added under Project Settings → SSH Keys → Additional SSH Keys
+  # (hostname github.com). The nightly jobs push their performance history with it
+  # (perf_finish). Empty: no key is loaded, and `scripts/perf/record` warns
+  # "history not pushed" and keeps the records in the job's artifacts.
+  perf-history-key-fingerprint:
+    type: string
+    default: ""
 
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
@@ -26,10 +34,17 @@ references:
 #   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
 # next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
-# The heavy jobs (rust-tests, rust-client-tests, the integration suites) start with
-# `heavy_gate`: on a draft PR, a PR whose base is not dev, or a branch with no PR they halt
-# green at once (.circleci/scripts/should-run-heavy.sh). The full-ci label or [full-ci] in
-# the commit message runs them anyway.
+# No CI runs on a draft PR: every job of the PR pipeline starts with a gate and halts green
+# at once (.circleci/scripts/should-run-heavy.sh). The light jobs (build, clippy, fmt,
+# js-unit-tests, plugin-ad4m-tests, deploy-scripts) use `draft_gate`: they halt on a draft only.
+# The heavy jobs (rust-tests, rust-client-tests, the integration suites) use `heavy_gate`: they
+# also halt on a PR whose base is not dev, or a branch with no PR. The full-ci label or [full-ci]
+# in the commit message runs everything anyway; a branch with no PR runs the light jobs. A new
+# job of the PR pipeline starts with one of the two gates. The GitHub workflow heavy-suites.yml
+# shows a halt as the pending status ci/heavy-suites; it turns success only once a pipeline of
+# the commit runs the heavy jobs, and starts one when the PR gets ready, is retargeted to dev or
+# gets the full-ci label without a push (it also starts one for a ready PR whose draft pipeline
+# halted the light jobs, so the light jobs run when a draft turns ready).
 
 commands:
   fix_workdir:
@@ -149,20 +164,44 @@ commands:
     description: "Halt a heavy job (green) on a draft PR, a PR whose base is not dev, or a branch with no PR"
     steps:
       - run:
-          # A stack of PRs pays the heavy suites once, at the PR that targets dev; the
-          # branches below it get fmt, build and clippy. dev, staging, main, tags and the
+          # A draft PR runs no CI (see draft_gate). A stack of PRs pays the heavy suites once,
+          # at the PR that targets dev; the ready branches below it get fmt, build and clippy. dev, staging, main, tags and the
           # nightly always run; so do a PR with the `full-ci` label and a head commit
           # with [full-ci] in its message. The decision is in the script (tested in
           # `build`); anything but its "skip" answer runs the suite, so a GitHub API
-          # failure costs a full run, never a skipped one. A halted job is green: a PR
-          # that gets ready or retargeted to dev without a push keeps that green until
-          # its workflow is rerun.
+          # failure costs a full run, never a skipped one. A halted job is green; the
+          # GitHub workflow heavy-suites.yml keeps the status ci/heavy-suites pending
+          # until a pipeline of the commit runs the heavy jobs, and starts one when the
+          # PR gets ready, is reopened, retargeted to dev or labeled full-ci without a
+          # push. Its script tells a halted job from one that ran by this step's name
+          # (it starts with "Stack gate") and whether a step follows it: keep both.
           name: Stack gate (heavy suites only for non-draft PRs to dev)
           environment:
             HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
           command: |
             rc=0
             bash .circleci/scripts/should-run-heavy.sh || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+            fi
+            exit 0
+
+  draft_gate:
+    description: "Halt a light job (green) on a draft PR"
+    steps:
+      - run:
+          # No CI on a draft PR. The same script and the same one lookup as heavy_gate (the
+          # `light` question), so a workflow's jobs agree. Only a draft halts: a PR whose base
+          # is not dev and a branch with no PR still run these jobs. Fails open like
+          # heavy_gate. The step name starts with "Draft gate", not "Stack gate", so that
+          # heavy-suites-pr.sh does not take a light job for a heavy one; it finds a halted
+          # `build` by this name (its last step), so keep both.
+          name: Draft gate (no CI on draft PRs)
+          environment:
+            HEAVY_GATE_FORCE: << pipeline.parameters.run-nightly-llm >>
+          command: |
+            rc=0
+            bash .circleci/scripts/should-run-heavy.sh light || rc=$?
             if [ "$rc" = 10 ]; then
               circleci-agent step halt
             fi
@@ -343,6 +382,109 @@ commands:
             mkdir -p test-artifacts
             echo "export TEST_ARTIFACTS=\"$PWD/test-artifacts\"" >> "$BASH_ENV"
 
+  # Performance history of the nightly jobs (scripts/perf/, see the header of
+  # scripts/perf/perf.mjs). perf_setup goes right before a job's test steps,
+  # perf_finish after them. A job that halts or fails before perf_setup has no
+  # results directory, and perf_finish records nothing. The history is
+  # nightly/<job>.jsonl on branch main of coasys/ad4m-wind-tunnel: record commits
+  # and pushes there with the deploy key of pipeline parameter
+  # perf-history-key-fingerprint. A push problem never fails the job: the records
+  # stay in the artifacts (perf/records.jsonl).
+  perf_setup:
+    description: "Give the tests a results directory for the performance history ($PERF_RESULTS_DIR)"
+    steps:
+      - run:
+          name: Perf history - results directory for this run
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}/perf/results/raw"
+            {
+              echo "export PERF_ARTIFACTS_DIR=\"$TEST_ARTIFACTS/perf\""
+              echo "export PERF_RESULTS_DIR=\"$TEST_ARTIFACTS/perf/results\""
+              echo "export PERF_PIPELINE_NUMBER=<< pipeline.number >>"
+            } >> "$BASH_ENV"
+      # The key is loaded here, before the tests, so a run whose tests fail still pushes.
+      - perf_history_key
+
+  # The history's deploy key, for a job that records. perf_history_cleanup deletes it.
+  perf_history_key:
+    steps:
+      - when:
+          condition: << pipeline.parameters.perf-history-key-fingerprint >>
+          steps:
+            - add_ssh_keys:
+                fingerprints:
+                  - << pipeline.parameters.perf-history-key-fingerprint >>
+            - run:
+                # Push with this key only: ssh would offer the checkout key first, and
+                # GitHub would take it as the (read-only) ad4m deploy key. The runner
+                # also runs PR jobs, so the key leaves ~/.ssh at once, with its
+                # ~/.ssh/config lines: this build keeps a copy of its own.
+                name: Perf history - use the history's deploy key
+                command: |
+                  scripts/perf/history-key use "<< pipeline.parameters.perf-history-key-fingerprint >>" >> "$BASH_ENV"
+
+  # Nothing of the history outlives the job on the runner: the key (in ~/.ssh, its
+  # ~/.ssh/config lines and this build's copy, found by fixed paths, so a failed
+  # perf_history_key is cleaned too), and any clone a killed command left (each
+  # command removes its own). Only this job's clones: each nightly job has its own
+  # serial group, so none of them is in use.
+  perf_history_cleanup:
+    parameters:
+      job:
+        type: string
+    steps:
+      - run:
+          name: Perf history - delete the key and the clones
+          when: always
+          command: |
+            fp="<< pipeline.parameters.perf-history-key-fingerprint >>"
+            if [ -n "$fp" ]; then scripts/perf/history-key clean "$fp"; fi
+            rm -rf "${TMPDIR:-/tmp}"/ad4m-perf-history-<< parameters.job >>-*
+
+  perf_finish:
+    description: "Record this run's numbers in the performance history, check them against it, draw the trend"
+    parameters:
+      job:
+        type: string
+      collect:
+        description: Steps that turn the raw logs into results JSON (always run)
+        type: steps
+        default: []
+    steps:
+      - run:
+          # Runs only when every step before it passed: the record's status.
+          name: Perf history - mark the tests passed
+          command: touch "${PERF_RESULTS_DIR:?}/.passed"
+      - steps: << parameters.collect >>
+      - run:
+          name: Perf history - record
+          when: always
+          command: |
+            if [ ! -d "${PERF_RESULTS_DIR:-}" ]; then
+              echo "no perf results directory (the job halted or failed before its tests): nothing recorded"
+              exit 0
+            fi
+            status=failed
+            if [ -e "$PERF_RESULTS_DIR/.passed" ]; then status=passed; fi
+            scripts/perf/record --job << parameters.job >> --status "$status" "$PERF_RESULTS_DIR"
+      - run:
+          # Fails the job on a serious regression against the last passing runs.
+          # A failed run is recorded but not checked: it makes no baseline either.
+          name: Perf history - check
+          command: scripts/perf/check --job << parameters.job >>
+      - run:
+          name: Perf history - trend page
+          when: always
+          command: |
+            if [ ! -d "${PERF_RESULTS_DIR:-}" ]; then exit 0; fi
+            scripts/perf/report --job << parameters.job >>
+      - store_artifacts:
+          when: always
+          path: test-artifacts/perf
+          destination: perf
+      - perf_history_cleanup:
+          job: << parameters.job >>
+
   setup_integration_test_environment:
     description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
     parameters:
@@ -429,6 +571,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Clean up stale local artifact stashes (older than 12 hours)
@@ -458,9 +601,19 @@ jobs:
           name: Test coasys-spaces.sh
           command: bash scripts/coasys-spaces.test.sh
       - run:
+          # Fake WE suite, fake scripts/perf, local git repo; about a second. The nightly
+          # feed-scale job's skip, data dir and calls to the performance history.
+          name: Test feed-scale.sh
+          command: bash scripts/feed-scale.test.sh
+      - run:
           # Fake curl with fixture PRs, no network; about a second. The heavy_gate decision.
           name: Test should-run-heavy.sh
           command: bash .circleci/scripts/should-run-heavy.test.sh
+      - run:
+          # Fake curl for the GitHub and CircleCI APIs, no network; about 15 seconds. The
+          # ci/heavy-suites status: CircleCI reads, the new pipeline, every pending (heavy-suites.yml).
+          name: Test heavy-suites-pr.sh
+          command: bash .github/scripts/heavy-suites-pr.test.sh
       - build_adam
       - build_integration_inputs
       - run:
@@ -619,6 +772,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - restore_rust_compile_inputs
       - run:
@@ -673,6 +827,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: cargo fmt --check
@@ -688,6 +843,10 @@ jobs:
       - setup_env
       - restore_rust_compile_inputs
       - run:
+          # The WASM language the runtime's ordering tests load; without the bundle they skip.
+          name: Build test WASM language
+          command: bash tests/rust-languages/build.sh && test -f tests/rust-languages/test-wasm-language/build/bundle.js
+      - run:
           # Unit tests, the crate's integration tests and doc-tests; the same command as
           # the crate's `pnpm test` script.
           name: rust-executor tests
@@ -697,9 +856,8 @@ jobs:
   # Trial, not a required check: the same suite under cargo-nextest, one process per
   # test, in parallel (.config/nextest.toml, profile `ci`). On one box it took about 30 s
   # against about 6 min for rust-tests. It runs beside rust-tests for a few days so the
-  # two can be compared on these runners; rust-tests stays the gate. The profile leaves
-  # out 18 tests that need a global another test set up (they run in rust-tests) and
-  # nextest runs no doc-tests (rust-executor has 9, all ignored). The JUnit report gives
+  # two can be compared on these runners; rust-tests stays the gate. nextest runs no
+  # doc-tests (rust-executor has 9, all ignored). The JUnit report gives
   # per-test times in the job's Tests tab. nextest is a pinned release, checked against
   # its SHA-256, kept in the runner's workdir (not the shared ~/.cargo/bin).
   rust-tests-nextest:
@@ -764,6 +922,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - setup_env
       - run:
           name: Install dependencies
@@ -793,6 +952,11 @@ jobs:
           # ai-wind-tunnel/recommendations.json is what the checked-in evidence derives.
           name: AI wind tunnel unit tests
           command: cd ./tests/js && pnpm run test-ai-wind-tunnel-unit
+      - run:
+          # The nightly performance history's tools (scripts/perf/) and the SFU
+          # wind tunnel's metric extraction (tests/js/helpers/sfu/perf.ts).
+          name: Perf history unit tests
+          command: cd ./tests/js && pnpm run test-perf-unit
 
   # The regular JS integration suite: local bootstrap languages only, no
   # Holochain conductor. Two-executor suites share languages, neighbourhoods
@@ -1144,20 +1308,34 @@ jobs:
       # older `build` for this SHA may already be deleted.
       - setup_integration_test_environment:
           build_binaries: true
+      # Perf history: each suite writes raw logs to $PERF_RESULTS_DIR/raw/<suite>.*
+      # (libtest-timer for the Rust tests, PERF_MOCHA_LOG for mocha) and each
+      # step's output to <suite>.log: the executor logs every prompt there
+      # ("prompt done"/"prompt failed" with its latency). perf_finish turns them
+      # into metrics with scripts/perf/llm-e2e-results.mjs.
+      - perf_setup
       - run:
           name: Rust LLM-E2E (interpretation + harness + flow-context suites)
+          # The tests log at warn; the AI service's info lines carry each prompt.
           command: |
+            set -o pipefail
+            export RUST_LOG="warn,rust_executor::ai_service=info"
             cd rust-executor && cargo test --release --lib -- \
               perspectives::interpretation_e2e \
               perspectives::interpretation_harness_e2e \
               perspectives::flow_context::real_llm_e2e \
               ai_service::providers::anthropic_e2e \
-              --ignored --test-threads=1 --nocapture
+              --ignored --test-threads=1 --nocapture 2>&1 \
+              | tee "$PERF_RESULTS_DIR/raw/rust.log" \
+              | node ../scripts/perf/libtest-timer.mjs "$PERF_RESULTS_DIR/raw/rust.libtest.json"
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (auto-processor + interpretation suites)
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm run test-model
+            set -o pipefail
+            export PERF_MOCHA_LOG="$PERF_RESULTS_DIR/raw/js_model.mocha.jsonl"
+            cd ./tests/js && LLM_E2E=1 pnpm run test-model 2>&1 \
+              | tee "$PERF_RESULTS_DIR/raw/js_model.log"
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (auto-processor multi-user)
@@ -1174,8 +1352,24 @@ jobs:
           # integration-tests-multi-node-holochain job does. Bare
           # `test-integration` needs the publishing agent in tst-tmp/.
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
+            set -o pipefail
+            export PERF_MOCHA_LOG="$PERF_RESULTS_DIR/raw/js_integration.mocha.jsonl"
+            cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain 2>&1 \
+              | tee "$PERF_RESULTS_DIR/raw/js_integration.log"
           no_output_timeout: 60m
+      - perf_finish:
+          job: llm-e2e
+          collect:
+            - run:
+                # The suites' model (their default when INTERPRETATION_E2E_MODEL is
+                # unset): another model is another series, never compared.
+                name: Perf history - llm-e2e results from the raw logs
+                when: always
+                command: |
+                  if [ ! -d "${PERF_RESULTS_DIR:-}" ]; then exit 0; fi
+                  node scripts/perf/llm-e2e-results.mjs --dir "$PERF_RESULTS_DIR/raw" \
+                    --model "${INTERPRETATION_E2E_MODEL:-qwen3.8-27b-48k}" \
+                    --out "$PERF_RESULTS_DIR/llm-e2e.json"
 
   # Wind tunnel across executors: cascade, the two-executor session (T21)
   # and network baselines, over Holochain. Several scenarios sleep on
@@ -1194,10 +1388,22 @@ jobs:
           # T21 runs calls in real neighbourhoods, so it needs the test languages published.
           name: Prepare the test languages
           command: cd ./tests/js && pnpm run prepare-test
+      - perf_setup
       - run:
+          # Each scenario writes its numbers to $PERF_RESULTS_DIR/sfu-<id>.json
+          # (tests/js/helpers/sfu/perf.ts); the step adds the suite's own time.
           name: Run SFU wind tunnel tests
-          command: cd ./tests/js && pnpm run test-sfu
+          command: |
+            start=$(date +%s%3N)
+            status=0
+            (cd ./tests/js && pnpm run test-sfu) || status=$?
+            jq -n --argjson ms "$(( $(date +%s%3N) - start ))" \
+              '{metrics: [{metric: "sfu.suite.duration_ms", value: $ms, unit: "ms", better: "lower"}]}' \
+              > "$PERF_RESULTS_DIR/sfu-suite.json"
+            exit "$status"
           no_output_timeout: 30m
+      - perf_finish:
+          job: integration-tests-sfu
       - run:
           name: Collect logs on failure
           when: on_fail
@@ -1208,6 +1414,55 @@ jobs:
           when: on_fail
           path: test-artifacts
           destination: sfu-test-logs
+
+  # Agent harness scenarios (tests/agent-harness): A2 provision & connect, A4
+  # waker and A5 mocked A/V loop, each route in its own Docker pod (executor +
+  # mock LLM + the real OpenClaw / Hermes / Sovereign harness). Nightly only:
+  # the harness images are third-party and large, and a run takes tens of
+  # minutes. Like integration-tests-sfu it builds its own binaries, then wraps
+  # them in a thin executor image. Sovereign needs a privately built image and
+  # skips here; every OpenClaw and Hermes route is required, so a failure or a
+  # skip (e.g. an image that cannot be pulled) fails the job.
+  integration-tests-agent-harness:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      AD4M_EXEC_IMAGE: ad4m-agent-harness-executor:nightly
+      AGENT_HARNESS_REQUIRED: a2/external-native,a2/external-plugin,a2/managed,a2/hermes,a4/openclaw,a4/hermes,a5/hermes,a5/openclaw
+    steps:
+      - run:
+          name: Clear results and artifacts from earlier runs on this host
+          command: rm -rf /tmp/agent-harness-results /tmp/agent-harness-artifacts
+      - setup_integration_test_environment:
+          build_binaries: true
+      - run:
+          name: Check Docker
+          command: docker info --format 'Docker {{.ServerVersion}}, {{.NCPU}} CPUs'
+      - run:
+          name: Build the executor image from this commit's binaries
+          command: bash tests/agent-harness/interop/executor/build-image.sh
+      - run:
+          name: Install, typecheck and unit-test the agent harness
+          command: cd tests/agent-harness && pnpm install --ignore-workspace --frozen-lockfile && pnpm run build && pnpm test
+      - run:
+          name: Run agent harness scenarios
+          command: |
+            cd tests/agent-harness && ./node_modules/.bin/tsx src/main.ts --results-dir /tmp/agent-harness-results
+          no_output_timeout: 30m
+      - run:
+          name: Remove this run's harness images
+          when: always
+          command: docker image rm "$AD4M_EXEC_IMAGE" ad4m-agent-harness-openclaw-node:local ad4m-agent-harness-mockllm:local >/dev/null 2>&1 || true
+      - run:
+          name: Collect results and pod logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/agent-harness-artifacts
+            cp -r /tmp/agent-harness-results/agent-harness /tmp/agent-harness-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/agent-harness-artifacts
+          destination: agent-harness
 
   # The Coasys product path in WE, end to end, on this commit: a space, a call, its
   # transcript, extraction into the social DNA's classes, and the flows on what was found
@@ -1315,6 +1570,135 @@ jobs:
           path: /tmp/coasys-spaces-artifacts
           destination: coasys-spaces
 
+  # How the Feed behaves in a space with a million messages, on this commit's executor: WE web
+  # opens the space in Chromium, and the job measures the newest page (cold, then warm), the
+  # older page a scroll loads, the executor's model query under those loads, the executor's
+  # CPU over the loads (with the auto-processor WE registers for the space), its RSS, and the
+  # seeding itself (WE apps/we-web/e2e/feed-scale/, `test:feed-scale`).
+  # No model and no GPU. Nightly only, in `nightly-llm-e2e`, in a serial group of its own.
+  #
+  # The shell steps are in scripts/feed-scale.sh, which also runs by hand (`all`). The
+  # executor, SDK, WE and we-web steps are coasys-spaces.sh's, run in this job's work dir.
+  # The suite seeds by `runtime.importData` of a file of signed links, keeps its data off /tmp (a
+  # tmpfs on this host), and writes metrics.json; `perf` hands that to scripts/perf/record
+  # and lets scripts/perf/check judge it against the history, by the `feed-scale` rules in
+  # scripts/perf/thresholds.json. The job halts green when this
+  # ad4m commit, the WE commit and the size were already measured here.
+  feed-scale:
+    machine: true
+    resource_class: coasys/marvin
+    environment:
+      PLAYWRIGHT_HOST_PLATFORM_OVERRIDE: debian13-x64
+      PLAYWRIGHT_BROWSERS_PATH: /home/marvin/.cache/ms-playwright-debian13
+      WE_REF: << pipeline.parameters.we-ref >>
+      # Not /tmp: a million messages make a data dir of tens of GB. preflight empties it.
+      FEED_SCALE_ARTIFACTS: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+      # The record's `pipeline` field (scripts/perf/record reads it from here only).
+      PERF_PIPELINE_NUMBER: << pipeline.number >>
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Skip if this ad4m commit, this WE commit and this size were already measured
+          command: |
+            rc=0
+            bash scripts/feed-scale.sh preflight || rc=$?
+            if [ "$rc" = 10 ]; then
+              circleci-agent step halt
+              exit 0
+            fi
+            exit "$rc"
+      - run:
+          name: Get the executor for this commit (published, else build)
+          command: bash scripts/feed-scale.sh executor
+          no_output_timeout: 30m
+      - run:
+          name: Build and pack core and connect
+          command: bash scripts/feed-scale.sh sdk
+          no_output_timeout: 20m
+      - run:
+          name: Clone WE at we-ref and install it with this commit's SDK
+          command: bash scripts/feed-scale.sh we
+          no_output_timeout: 20m
+      - run:
+          name: Install Chromium's system libraries
+          command: |
+            sudo apt-get update -qq
+            ./tests/js/scripts/install-browser-deps.sh
+      - run:
+          name: Build we-web
+          command: bash scripts/feed-scale.sh build-web
+          no_output_timeout: 20m
+      # add_ssh_keys takes no `when: always`, so this cannot go between the suite and
+      # perf steps: a failed suite would skip it and the run's record would not push.
+      - perf_history_key
+      - run:
+          # The seed logs every 1%; one page load at a million may wait several minutes.
+          name: Run the feed-scale suite (WE test:feed-scale)
+          command: bash scripts/feed-scale.sh test
+          no_output_timeout: 60m
+      - run:
+          # A failed run is recorded too (as failed), and only a passed one is judged.
+          name: Record the numbers in the performance history and check them
+          when: always
+          command: bash scripts/feed-scale.sh perf
+      - run:
+          name: Record this commit pair and size as measured
+          command: bash scripts/feed-scale.sh record
+      - run:
+          # A stopped or timed-out suite can leave the executor, a browser or its tens
+          # of GB behind.
+          name: Stop what the run left and empty the data dir
+          when: always
+          command: bash scripts/feed-scale.sh cleanup
+      - store_artifacts:
+          when: always
+          path: /home/marvin/.cache/ad4m-ci/feed-scale/artifacts
+          destination: feed-scale
+      - perf_history_cleanup:
+          job: feed-scale
+      - run:
+          name: Summary
+          when: always
+          command: bash scripts/feed-scale.sh summary
+
+  # How the work of ONE executor grows with the number of agents it holds: multi-user mode,
+  # without Holochain, at 10, 20, 50 and 100 agents (tests/js/tests/agent-scale.test.ts). Each
+  # count runs on a fresh executor and data dir: onboarding, a sign-in of all agents at once,
+  # writes, reads, events, one shared neighbourhood (local link language), 30 s idle and a
+  # restart; RSS and threads are sampled every second. Every metric is recorded per count
+  # (`params: {agents: N}`) with its growth from 10 to 100, and scripts/perf/check judges it by
+  # the `agent-scale` rules in scripts/perf/thresholds.json. The test fails only on a functional
+  # error; a metric that scales poorly is flagged in its table, not failed. Nightly only, in
+  # `nightly-llm-e2e`, in a serial group of its own. It builds its own binaries: that pipeline has
+  # no `build` job.
+  agent-scale:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment:
+          local: true
+          build_binaries: true
+      - run:
+          name: Prepare the local test languages
+          command: cd ./tests/js && pnpm run prepare-test-local
+      - perf_setup
+      - run:
+          # The test writes $PERF_RESULTS_DIR/agent-scale.json and prints its table.
+          name: Run the agent-scale wind tunnel
+          command: |
+            mkdir -p "${TEST_ARTIFACTS:?}"
+            set -o pipefail
+            cd ./tests/js && pnpm run test:agent-scale 2>&1 | tee "$TEST_ARTIFACTS/agent-scale.log"
+          no_output_timeout: 40m
+      - perf_finish:
+          job: agent-scale
+      - store_artifacts:
+          when: always
+          path: test-artifacts
+          destination: agent-scale-logs
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -1339,6 +1723,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: Install dependencies
           working_directory: plugins/ad4m
@@ -1385,6 +1770,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
+      - draft_gate
       - run:
           name: shellcheck deploy/staging
           command: |
@@ -1464,14 +1850,14 @@ workflows:
   # `run-nightly-llm`. In-config cron does not reach this project.
   # Same resource class (Marvin). llm-e2e and coasys-spaces both prompt
   # staging's llama-server, which already holds the GPU, and neither loads
-  # a model. llm-e2e's embeddings stay on Ollama (:11434). llm-e2e, the SFU
-  # wind tunnel and coasys-spaces start together and do not build on each
-  # other's result: an llm-e2e failure must not skip the tunnel, and a tunnel
-  # failure must not skip llm-e2e. Three API triggers fire this pipeline every night on
-  # one host. Each job has its own serial group, so a second trigger waits
-  # instead of sharing ports, DIDs and the GPU with the first. llm-e2e and
-  # coasys-spaces share one group (`nightly-llm`) so they do not run at once
-  # on that one slot.
+  # a model. llm-e2e's embeddings stay on Ollama (:11434). The agent harness
+  # uses its own mock LLM. feed-scale and agent-scale need no model. llm-e2e, the SFU wind
+  # tunnel, coasys-spaces, the agent harness, feed-scale and agent-scale start together
+  # and do not build on each other's result: one failing must not skip the
+  # others. Three API triggers fire this pipeline every night on one host.
+  # Each job has its own serial group, so a second trigger waits instead of
+  # sharing ports, DIDs and the GPU with the first. llm-e2e and coasys-spaces
+  # share one group (`nightly-llm`) so they do not run at once on that one slot.
   nightly-llm-e2e:
     when: << pipeline.parameters.run-nightly-llm >>
     jobs:
@@ -1486,3 +1872,9 @@ workflows:
           serial-group: << pipeline.project.slug >>/nightly-sfu-browsers
       - coasys-spaces:
           serial-group: << pipeline.project.slug >>/nightly-llm
+      - integration-tests-agent-harness:
+          serial-group: << pipeline.project.slug >>/nightly-agent-harness
+      - feed-scale:
+          serial-group: << pipeline.project.slug >>/nightly-feed-scale
+      - agent-scale:
+          serial-group: << pipeline.project.slug >>/nightly-agent-scale

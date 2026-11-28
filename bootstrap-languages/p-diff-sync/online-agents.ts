@@ -22,6 +22,23 @@
  */
 export const STATUS_CONCURRENCY = 8;
 
+/**
+ * One lookup at a time: a call made while a lookup runs gets that lookup's
+ * answer, and the next call after it ends starts a new one. The executor
+ * runs `getOnlineAgents` calls side by side, and STATUS_CONCURRENCY caps one
+ * lookup only: without this, four overlapping roster polls would hold
+ * 4 × 8 = 32 permits, every one the node has.
+ */
+export function singleFlight<T>(lookup: () => Promise<T>): () => Promise<T> {
+    let inFlight: Promise<T> | null = null;
+    return () => {
+        inFlight ??= lookup().finally(() => {
+            inFlight = null;
+        });
+        return inFlight;
+    };
+}
+
 export async function getOnlineAgents(
     getActiveAgents: () => Promise<any[]>,
     getAgentStatus: (agent: any) => Promise<any>,
