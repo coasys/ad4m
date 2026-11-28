@@ -1,0 +1,34 @@
+# Model queries
+
+A **model query** asks for instances of one or more subject classes: `perspective.modelQuery(className, queryJson)`. The executor loads each class's SHACL shape, builds SPARQL from it, runs that on the store, and returns JSON instances with their properties, relations and a total count.
+
+**Why:** The executor builds and filters the queries of the SDK's model classes (`Ad4mModel`), so only instances cross the socket and no client repeats the logic. With the engine in the executor, MCP tools, live queries, flows and interpretation use the same reader. The shape comes from SHACL stored in the perspective, so the executor needs no client code to read a class.
+
+**Parent:** [Querying](README.md)
+
+<details><summary>How it works</summary>
+
+Every model query goes through `run_model_query` ([perspective_instance/runner.rs](../../../rust-executor/src/perspectives/perspective_instance/runner.rs)): a `perspective.modelQuery` call, a model subscription's first run and its re-check after a write. Identical runs in flight share one store run, keyed by the classes, the query text, the shape-wait budget, and the store's write and shapes generations. `execute_model_query` is the pipeline (diagram in [model_query/mod.rs](../../../rust-executor/src/perspectives/model_query/mod.rs)):
+
+1. **Shape**: `get_shape(class)` returns a cached `Arc<ModelShape>` parsed from SHACL links. In a neighbourhood, `get_shape_or_wait` waits up to 20 s (`MODEL_QUERY_SHAPE_WAIT`) for SHACL that has not synced yet. A store write that touches a shape's own links drops the cache inside the write (`clear_shape_cache`, [Link write path](../links/write-path.md)).
+2. **SPARQL build** (`sparql_builder`): conformance patterns (which triples make a URI an instance), pushed-down `where` filters, the link guard (status and signature), paging.
+3. **Store**: run on the `SparqlStore`.
+4. **Hydration**: group rows by instance, decode `literal:` values, collect relation arrays, apply collection ordering, add author and timestamp. A property whose value needs a fetch from a language (`resolveLanguage`) or a transform is resolved for every row only when the `where` or `order` reads it (`read_before_window`); the others are resolved after paging, for the returned page only. A query that names its `properties` resolves on the page only what it returns (`returned`: those properties, its `include` keys, `id` and `baseExpression`); a property it leaves out is fetched only when the `where` or `order` reads it, and is then stripped. The same holds for getters and reverse relations: one the query does not return, filter or sort by is not run.
+5. **Filtering and sorting** for conditions SPARQL could not express.
+6. **Getters and relations**: SPARQL `ASK` / `SELECT` getters, reverse relations, recursive `include`.
+7. **Projections**: counts and lists over relation edges.
+
+Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `after`, `count`, `properties`, `include`, `projections`, `parent` scope, `deepQuery`, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`, `links` (the links behind named properties or predicates, under `__links`).
+`after` is a keyset cursor: `""` for the first page, then the previous reply's `nextCursor`, for the timestamp order only; any other query that sends it is refused ([model_query/cursor.rs](../../../rust-executor/src/perspectives/model_query/cursor.rs), `KeysetCursor`).
+By default only links whose signature verifies are read. Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-ins `ad4m://TextContent` and `ad4m://Mentioning`) resolve to the concrete classes that implement them.
+
+</details>
+
+<details><summary>Where in the code</summary>
+
+- [perspectives/model_query/](../../../rust-executor/src/perspectives/model_query): [query.rs](../../../rust-executor/src/perspectives/model_query/query.rs) (`execute_model_query`), [shape.rs](../../../rust-executor/src/perspectives/model_query/shape.rs), [sparql_builder.rs](../../../rust-executor/src/perspectives/model_query/sparql_builder.rs) (`LinkGuard`), [hydration.rs](../../../rust-executor/src/perspectives/model_query/hydration.rs), [filtering.rs](../../../rust-executor/src/perspectives/model_query/filtering.rs), [types.rs](../../../rust-executor/src/perspectives/model_query/types.rs), [union.rs](../../../rust-executor/src/perspectives/model_query/union.rs), [abstract_classes.rs](../../../rust-executor/src/perspectives/model_query/abstract_classes.rs).
+- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `model_query`, `model_query_classes`, `get_shape`, `get_shape_or_wait`, `evaluate_getters`; [perspective_instance/runner.rs](../../../rust-executor/src/perspectives/perspective_instance/runner.rs): `run_model_query`; [perspective_instance/abstract_classes.rs](../../../rust-executor/src/perspectives/perspective_instance/abstract_classes.rs): `clear_shape_cache`, `shapes_generation`.
+- SDK: [core/src/model/Ad4mModel.ts](../../../core/src/model/Ad4mModel.ts) (`findAll`, `query`); see [Model classes](../../agents/interfaces/typescript-sdk/model-classes.md).
+- Guide: [docs-src/pages/developer-guides/model-classes.mdx](../../../docs-src/pages/developer-guides/model-classes.mdx).
+
+</details>

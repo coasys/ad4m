@@ -1,0 +1,54 @@
+# Language isolates
+
+A **language isolate** is one Deno `MainWorker`, built from the executor's V8 snapshot, that runs one language bundle on its own OS thread. The bundle reaches the executor through the `ad4m:host` module, which wraps Rust `#[op2]` ops. The executor runs one isolate per language, and every agent on the executor shares it: each request names the agent it runs as.
+
+**Why:** Third-party code must not see the agent's keys. The isolate gets file access only to its own storage directory. Signing is an op that returns a signature, never a key. One isolate per language, not one per agent, means an executor runs one instance of a language even when several of its agents share a neighbourhood. [`docs-src/host-contract.md`](../../../docs-src/host-contract.md) describes the `host.js` surface for other hosts (browser, Node.js).
+
+**Parent:** [Language runtime](README.md)
+
+<details><summary>How it works</summary>
+
+Sandbox (`JsCore::new_for_language`):
+
+| Permission | Normal language | System language |
+|---|---|---|
+| read / write | own storage directory | own storage directory + executor working directory |
+| net | any host | any host |
+| import | only `ad4m.language` (the bundle's own URL) | same |
+| env, run, ffi, sys | denied | denied |
+
+`ad4m:host` exports (from `host.js`):
+
+| Area | Exports |
+|---|---|
+| agent | `agentDid`, `agentSigningKeyId`, `agentSign`, `agentSignStringHex`, `agentOpenSealed`, `agentCreateSignedExpression`, `agentGetAllLocalUserDids`, `agentCreateSignedExpressionForUser`, `agentDidForUser` |
+| Holochain | `holochainRegisterDnas`, `holochainAppInfo`, `holochainCall`, `holochainCallAsync` |
+| HTTP, hash | `httpFetch` (10 s timeout, URL secrets redacted in errors), `hash` |
+| language context | `languageStorageDirectory`, `languageAddress`, `languageSettings` |
+| emit | `emitPerspectiveDiff`, `emitSyncStateChange`, `emitTelepresenceSignal`, `emitSignal` |
+| storage | `storageGet`, `storagePut`, `storageDelete`, `storageListKeys`; optional `readStorageFile`, `writeStorageFile` |
+
+`host.js` is a wrapper. The ops behind it are also on globals that bundle code can call directly: `AGENT`, `HOLOCHAIN_SERVICE`, `LANGUAGE_CONTROLLER`.
+
+Threading:
+
+1. `process_requests` selects between the request channel and the V8 event loop, so timers and signals run between requests.
+2. Each `Execute(js, ctx, kind)` has a `CallKind`. An **ordered** call runs alone among the ordered calls, in send order: commits, sync, expression creates, interactions, signal delivery. A **concurrent** call (a read, or an emit whose order does not matter) starts at once and runs beside the others, up to `MAX_CONCURRENT_CALLS` (16) in flight. On a WASM language (wasm-bindgen bundle) every call runs ordered. Loading, callback registration and teardown run alone, in send order.
+3. Each call carries its own agent. The runtime registers `ctx` under the call's id (`register_call_agent`); the script takes it out as a call token (`agent_call_token`), and the agent ops and the Holochain ops act as that token's agent ([Holochain service](../../agents/executor/services/holochain.md)). Code outside any call has no agent, and the ops refuse.
+4. Nothing interrupts a running call: its caller waits until it ends. Once the running ordered call has run for the language call deadline (`LANGUAGE_CALL_DEADLINE`, 60 s), an ordered call queued behind it gets an error, and a new ordered call fails at once without being queued. A call that has not started within the deadline after it was sent also gets an error. The runtime never starts a call whose caller has gone.
+5. Holochain signals arrive through `lib.rs::holochain_signal_receiver`. It looks up the cell in `HOLOCHAIN_SIGNAL_HANDLERS` and calls `__handleHolochainSignal__` in that language's isolate, as the main agent, or as the managed agent whose user cell received the signal.
+
+</details>
+
+<details><summary>Where in the code</summary>
+
+- [rust-executor/src/js_core/mod.rs](../../../rust-executor/src/js_core/mod.rs): `JsCore`, `new_for_language` (permissions), `execute`.
+- [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `LANGUAGE_CALL_DEADLINE`, `wait_for_call`, `is_wasm_bundle`; [language_runtime.rs](../../../rust-executor/src/languages/language_runtime.rs): `CallKind`, `MAX_CONCURRENT_CALLS`, `process_requests`, `RunningRequest`.
+- [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `register_call_agent`, `CallAgent`, the agent of each call.
+- [rust-executor/src/js_core/options.rs](../../../rust-executor/src/js_core/options.rs): `ad4m_language_extensions()` (the op extensions every isolate gets), worker options, module loader.
+- [rust-executor/src/js_core/host.js](../../../rust-executor/src/js_core/host.js): the `ad4m:host` module.
+- [rust-executor/src/js_core/language_bootstrap.js](../../../rust-executor/src/js_core/language_bootstrap.js): main module of every isolate; `initLanguage`, the export table, DOM and `Buffer` shims.
+- [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs), [languages_extension.rs](../../../rust-executor/src/js_core/languages_extension.rs), [signature_extension.rs](../../../rust-executor/src/js_core/signature_extension.rs), [utils_extension.rs](../../../rust-executor/src/js_core/utils_extension.rs): the ops.
+- [rust-executor/src/holochain_service/holochain_service_extension.rs](../../../rust-executor/src/holochain_service/holochain_service_extension.rs), [rust-executor/src/runtime_service/runtime_service_extension.rs](../../../rust-executor/src/runtime_service/runtime_service_extension.rs): Holochain and runtime ops.
+
+</details>
