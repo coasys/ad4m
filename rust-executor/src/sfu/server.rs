@@ -1434,6 +1434,8 @@ impl SfuServer {
         let (mut sockets_version, mut sockets) = media.snapshot();
         // The socket read first, rotated so a busy one cannot starve the rest.
         let mut first_read = 0usize;
+        // A command that ended the wait below; the drain at the top handles it.
+        let mut woken: Option<SfuCommand> = None;
 
         info!(
             "SFU event loop started on {:?}",
@@ -1448,9 +1450,14 @@ impl SfuServer {
                     sockets.iter().map(|(addr, _)| *addr).collect::<Vec<_>>()
                 );
             }
-            // Process commands
+            // Process commands: the one that ended the wait first, then
+            // whatever else is queued.
             loop {
-                match command_rx.try_recv() {
+                let next = woken
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| command_rx.try_recv());
+                match next {
                     Ok(SfuCommand::AddPeer(peer)) => {
                         let pid = peer.id.clone();
                         let room_id = peer.room_id.clone();
@@ -2096,6 +2103,17 @@ impl SfuServer {
                         }
                         Err(e) => {
                             error!("SFU: UDP recv error: {:?}", e);
+                        }
+                    }
+                }
+                command = command_rx.recv() => {
+                    // A command ends the wait at once instead of at the next
+                    // packet or timer.
+                    match command {
+                        Some(command) => woken = Some(command),
+                        None => {
+                            info!("SFU command channel closed, shutting down");
+                            return;
                         }
                     }
                 }
@@ -6434,6 +6452,40 @@ mod tests {
             .await
             .unwrap();
         assert!(kept.await.unwrap().is_empty());
+        let _ = server.command_tx.send(SfuCommand::Shutdown).await;
+    }
+
+    /// A command sent to an idle loop (no packet, no timer due) is handled
+    /// at once, not at the next 100 ms wake.
+    #[tokio::test]
+    async fn a_command_wakes_an_idle_loop_at_once() {
+        let server = SfuServer::start(SfuServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let ask = || async {
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let sent = std::time::Instant::now();
+            server
+                .command_tx
+                .send(SfuCommand::GetQualityPreferences { reply })
+                .await
+                .unwrap();
+            answer.await.unwrap();
+            sent.elapsed()
+        };
+        // The first answer proves the loop is running; it then waits in select.
+        ask().await;
+        let mut slowest = Duration::ZERO;
+        for _ in 0..5 {
+            slowest = slowest.max(ask().await);
+        }
+        assert!(
+            slowest < Duration::from_millis(50),
+            "a command waited {slowest:?} on an idle loop"
+        );
         let _ = server.command_tx.send(SfuCommand::Shutdown).await;
     }
 
