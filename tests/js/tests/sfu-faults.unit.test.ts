@@ -6,6 +6,7 @@
 
 import { expect } from "chai";
 import { createServer, connect, type AddressInfo, type Socket } from "node:net";
+import sinon from "sinon";
 
 import { Call, type Check } from "../helpers/sfu/e2e/call.js";
 import { Hearing } from "../helpers/sfu/e2e/media.js";
@@ -175,28 +176,44 @@ describe("SFU fault layer: WsShaper drops whole messages", () => {
 });
 
 describe("SFU fault layer: Call.eventually keeps its bound", () => {
+  // A fake clock: the bounds are judged on controlled time, not on how fast this host runs.
+  let clock: sinon.SinonFakeTimers;
+  beforeEach(() => {
+    clock = sinon.useFakeTimers();
+  });
+  afterEach(() => clock.restore());
+
   /** A Call whose snapshots take `ms` and always show a healthy call. No processes. */
   const slowCall = (ms: number): Call =>
     Object.assign(Object.create(Call.prototype) as Call, {
       snapshots: () => new Promise<Map<string, Snapshot>>((resolve) => setTimeout(() => resolve(new Map()), ms)),
     });
   const ok: Check = () => [];
+  /** `promise`'s outcome once the fake clock has run `ms`. */
+  const after = async <T>(promise: Promise<T>, ms: number): Promise<T | Error> => {
+    const settled = promise.then((value) => value, (e: Error) => e);
+    await clock.tickAsync(ms);
+    return settled;
+  };
 
   it("fails a success whose snapshots came back after the bound", async () => {
-    const started = Date.now();
-    const error = await slowCall(40).eventually(ok, 5, "late").then(() => null, (e: Error) => e);
-    expect(error?.message).to.match(/^late: not true within 5 ms/);
-    expect(Date.now() - started).to.be.below(40);
+    const outcome = await after(slowCall(40).eventually(ok, 5, "late"), 100);
+    expect((outcome as Error).message).to.match(/^late: not true within 5 ms/);
   });
 
   it("passes a success inside the bound", async () => {
-    expect(await slowCall(5).eventually(ok, 1_000, "in time")).to.be.below(1_000);
+    expect(await after(slowCall(5).eventually(ok, 1_000, "in time"), 100)).to.equal(5);
+  });
+
+  it("a check still false at the bound fails with what the snapshots last showed", async () => {
+    const outcome = await after(slowCall(1).eventually(() => ["u1 sees u2 at 320x240, expected 640x480"], 250, "video"), 1_000);
+    expect((outcome as Error).message).to.match(/^video: not true within 250 ms — u1 sees u2 at 320x240, expected 640x480/);
   });
 
   it("now looks once, with no bound", async () => {
-    await slowCall(20).now(ok, "once");
-    const error = await slowCall(1).now(() => ["u1 hears nothing from u2"], "once").then(() => null, (e: Error) => e);
-    expect(error?.message).to.equal("once: not true — u1 hears nothing from u2");
+    expect(await after(slowCall(20).now(ok, "once"), 100)).to.equal(undefined);
+    const outcome = await after(slowCall(1).now(() => ["u1 hears nothing from u2"], "once"), 100);
+    expect((outcome as Error).message).to.equal("once: not true — u1 hears nothing from u2");
   });
 });
 
@@ -314,5 +331,13 @@ describe("SFU fault layer: Hearing keeps a participant's frames when a track is 
     (hearing as unknown as { receivers: Map<string, unknown> }).receivers.set("a1", receiver("audio", 9));
     hearing.remotes([heard("did:bob", track("a1", "audio"))], []);
     expect(hearing.remotes([], [])).to.deep.equal({});
+  });
+
+  it("a track that leaves before the first remotes() call does not throw", () => {
+    const hearing = new Hearing();
+    // As attach() leaves it: a receiver exists, remotes() never saw its owner.
+    (hearing as unknown as { receivers: Map<string, unknown> }).receivers.set("a1", receiver("audio", 9));
+    expect(() => hearing.remotes([heard("did:bob")], [])).to.not.throw();
+    expect(hearing.remotes([heard("did:bob")], [])["did:bob"].audioFrames).to.equal(0);
   });
 });
