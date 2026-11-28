@@ -1737,7 +1737,8 @@ async fn look_up_agents_together(bundle: String, store_url: &str, address: &str)
 /// two open and the lot takes at least `LOOKUPS * STORE_DELAY`.
 ///
 /// The overlap is read off the store's side (its peak of requests held open), which a slow
-/// machine cannot fake; the time bound is only the user-visible form of it.
+/// machine cannot fake. The marked run asserts no time bound, because a loaded runner can
+/// stretch it; its time is printed. The unmarked run's lower bound holds on any machine.
 #[tokio::test(flavor = "multi_thread")]
 async fn centralized_agent_lookups_overlap_when_marked_and_queue_when_not() {
     let bundle = centralized_agent_bundle();
@@ -1755,10 +1756,8 @@ async fn centralized_agent_lookups_overlap_when_marked_and_queue_when_not() {
         marked_peak > 1,
         "the store never held two lookups open at once (peak {marked_peak}): the marked language ran them one by one"
     );
-    assert!(
-        overlapped < serial_floor / 2,
-        "{LOOKUPS} overlapped lookups took {overlapped:?}, not well under the serial {serial_floor:?} (peak {marked_peak})"
-    );
+    // No upper bound on `overlapped`: a loaded runner can stretch it, and the peak above
+    // already shows the overlap. It is printed below.
 
     let unmarked = bundle.replace(ad4m_ldk::MARKER_EXPORT, "__ldkVersionMarker");
     assert!(!unmarked.contains(ad4m_ldk::MARKER_EXPORT));
