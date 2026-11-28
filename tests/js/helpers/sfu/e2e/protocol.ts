@@ -38,6 +38,8 @@ export type Command =
   | { kind: "send"; label: string; data: string; binary: boolean }
   /** The platform says the network changed: `online` on the global object, as a browser fires it. */
   | { kind: "networkChanged" }
+  /** One RPC over the client's app socket, answered: which socket carries it is the caller's to see. */
+  | { kind: "probe" }
   | { kind: "snapshot" }
   | { kind: "close" };
 

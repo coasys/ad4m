@@ -168,12 +168,17 @@ export class Call {
     return Object.values(this.world.users).find((u) => u.did === did)?.name ?? did.slice(-8);
   }
 
-  /** For every present participant, every other present participant: `test` returns a problem or null. */
-  private pairs(test: (snapshot: Snapshot, other: string, me: string, snapshots: Map<string, Snapshot>, holding: boolean) => string | null): Check {
+  /**
+   * For every present participant, every other present participant: `test` returns a problem or null.
+   * `among` narrows both sides to those participants.
+   */
+  private pairs(test: (snapshot: Snapshot, other: string, me: string, snapshots: Map<string, Snapshot>, holding: boolean) => string | null, among?: string[]): Check {
     return (snapshots, holding = false) => {
       const problems: string[] = [];
+      const others = among ? [...this.present].filter((name) => among.includes(name)) : [...this.present];
       for (const [me, snapshot] of snapshots) {
-        for (const other of this.present) {
+        if (among && !among.includes(me)) continue;
+        for (const other of others) {
           if (other === me) continue;
           const problem = test(snapshot, other, me, snapshots, holding);
           if (problem) problems.push(`${me} ${problem}`);
@@ -206,9 +211,9 @@ export class Call {
    * call while the sender's or the receiver's process has just stood still
    * (`pausedMs`): the harness, not the call, made no sound or heard none. A
    * wrong tone always counts, and so does silence still there once the pause
-   * has passed out of the participants' window.
+   * has passed out of the participants' window. `among` narrows it to those participants.
    */
-  hearsEveryone(): Check {
+  hearsEveryone(among?: string[]): Check {
     return this.pairs((snapshot, other, me, snapshots, holding) => {
       const theirs = snapshot.sessions.filter((s) => s.agentDid === this.did(other) && s.audioRecent > 0);
       const expected = this.tones.get(other);
@@ -221,7 +226,7 @@ export class Call {
       if (theirs.length === 0) return `hears nothing from ${other}`;
       const heard = theirs.map((s) => (s.tone == null ? "silence" : `${s.tone} Hz (${this.toneOwner(s.tone)})`)).join(", ");
       return `hears ${heard} from ${other}, who sends ${expected} Hz`;
-    });
+    }, among);
   }
 
   /** Nobody hears their own tone back. */
@@ -231,8 +236,8 @@ export class Call {
       .map(([me]) => `${me} hears its own tone`);
   }
 
-  /** Video arriving now from every other participant, at `size` when given. */
-  seesEveryone(size?: Size): Check {
+  /** Video arriving now from every other participant, at `size` when given; `among` narrows it to those participants. */
+  seesEveryone(size?: Size, among?: string[]): Check {
     return this.pairs((snapshot, other) => {
       const remote = snapshot.remotes[this.did(other)];
       if (!remote || remote.videoRecent === 0) return `sees nothing from ${other}`;
@@ -240,7 +245,7 @@ export class Call {
         return `sees ${other} at ${remote.width}x${remote.height}, expected ${size.width}x${size.height}`;
       }
       return null;
-    });
+    }, among);
   }
 
   /**
