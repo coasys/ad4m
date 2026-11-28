@@ -25,6 +25,7 @@ before you work there.
 | `tests/js/` | `tests/js/AGENTS.md` (integration suites) |
 | `test-runner/` | Language test harness |
 | `docs-src/` | Docs site and language interface specs (`language-interface-spec.md`, `host-contract.md`) |
+| `mental-models/` | `mental-models/README.md` (the mental models of this code base: a tree of short pages, one concept each, from ADAM down to links into the code) |
 | `planning/` | Dated design specs |
 
 There is no `executor/` package any more: ignore references to it in older docs.
@@ -49,6 +50,21 @@ There is no `executor/` package any more: ignore references to it in older docs.
   stops every `AGENTS.md` below it from loading. To keep a personal
   `CLAUDE.local.md`, set Claude Code's Project instructions to
   `claude-md-and-agents-md` (`/config`).
+- **Keep `mental-models/` true in the same PR.** A change to how the system works
+  (a component, a flow, who decides what, where a rule lives, what a term means)
+  updates the page that owns that concept in the same PR. A change that only
+  touches internals no page describes updates nothing. Follow
+  `mental-models/CONVENTIONS.md`, and keep the update small:
+  - Change only the sentences the code makes untrue, with the fewest words, at
+    the level the change lives. A parent page changes only when its own model
+    changes; detail goes into the leaf page and its diagram.
+  - A new concept gets its own page under the right parent, plus one line in the
+    parent's Parts list. A removed concept loses its page and that line.
+  - State the code as it is after the PR: no plans, open questions, defects,
+    PR numbers or history. Relative links to code, no line numbers.
+  - Use the terms in `mental-models/GLOSSARY.md`; add a term there when a page
+    needs a new ADAM term (general technical terms get no entry).
+  - Before pushing, check that every relative link in the changed pages resolves.
 - **RPC contracts are generated.** Every executor method registers
   `map.method::<Params, Result>(name, handler)` (`.read()`, `.long()`). After
   changing a method or a type it reaches, run `cd core && pnpm run generate:api-types`;
@@ -70,6 +86,29 @@ There is no `executor/` package any more: ignore references to it in older docs.
   override, `#[tokio::test(start_paused = true)]` or fake timers. Do not pause
   the tokio clock in a test that talks to a real language runtime thread: that
   thread has its own clock.
+- **A change ships the test that proves it.** A PR that adds or changes behaviour
+  adds a test that fails without the change, and the test asserts the result,
+  not only that the code ran. Reviewers ask for this more than for any other rule.
+- **A test fails when it cannot run.** A missing precondition (a fixture, a
+  built binary, a service the test needs) is a failure, not a skip. The only
+  skips are machine capabilities that CI provides by setting a flag, as
+  `SFU_BROWSERS_REQUIRED=1` does; with the flag set, the test fails instead.
+- **Reuse before you write.** Use the existing type, helper or function for the
+  same job; do not add a second one beside it. When the existing one does not
+  fit, change it.
+- **New code goes in the module that owns the concept.** Do not add a helper in
+  the caller's file when a module for that concept exists.
+- **Remove what the change leaves behind.** Delete the dead branch, the
+  unused helper and the duplicate path in the same PR.
+- **Docs move with the code.** A PR that changes behaviour, a name or a path
+  updates every doc and code comment that states it, in the same PR.
+- **Code comments do not cite PRs or issues.** A comment says why the code is
+  the way it is; the PR number lives in the commit and in `git blame`. A
+  workaround is the exception: it names the issue that will remove it.
+- **Split a file past about 1,000 lines** into parts along the concepts it
+  holds, in a PR of its own when the split is large.
+- **Commit only the change.** No review-reply notes, scratch files, logs or
+  local planning files. Design docs go to `planning/` (rule above).
 - `connect/` tests (vitest + happy-dom) fail under Node 26; use Node 24.
 - Run `cargo fmt --all` (and push) from the worktree's own top level. In the
   main checkout it exits 0 and changes nothing in a linked worktree, so CI
