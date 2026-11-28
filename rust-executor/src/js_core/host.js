@@ -98,6 +98,11 @@ export function agentDidForUser(userEmail) { return agent().didForUser(userEmail
 export function holochainRegisterDnas(dnas) {
     return holochainDelegate().registerDNAs(dnas, undefined);
 }
+// The AppInfo of the calling agent's own app for `dnaNick` (#1775): every
+// managed user has its own cell, so its own Holochain agent key.
+export function holochainAppInfo(dnaNick) {
+    return holochainDelegate().appInfo(dnaNick);
+}
 export function holochainCall(dnaNick, zome, fnName, params) {
     return holochainDelegate().call(dnaNick, zome, fnName, params);
 }
