@@ -136,6 +136,13 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   neighbourhood existed were never sent. When that push fails (commit error, or `render()`
   null while the language's first render runs), it queues them as one pending diff, so the
   queue, not the refusing fallback, delivers them.
+- After that check, over the whole Shared set, the fallback sync sends only the missing links
+  authored by the perspective's local agents (`local_agents`: its owners, main or managed; the
+  main agent's DID without any), compared as DID strings. Another agent's link is its author's
+  to share: sending it again pushed a duplicate diff every pass (staging, 2026-11-03: 80 commits
+  overnight from an executor that wrote none of the room's links) and could bring back a link
+  its author removed. The refusal counts every Shared link, so a few own links missing beside
+  many present links of other authors still go out. The push at publish is not filtered.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.
