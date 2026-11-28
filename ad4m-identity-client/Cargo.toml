@@ -14,10 +14,18 @@ default = []
 test-vault = []
 # `ExecutorRpc` for `ad4m-client`'s WebSocket client (native only).
 ws = ["dep:ad4m-client"]
+# `ViaStore`: `ExecutorRpc` over the identity store's HTTPS routes, for a device with no
+# executor of its own (the phone). No transport of its own: the surface supplies `HttpClient`,
+# the device-key signer and the enc-key opener.
+store = []
 
 [[example]]
 name = "holder"
 required-features = ["ws", "test-vault"]
+
+[[test]]
+name = "store"
+required-features = ["store"]
 
 [dependencies]
 # The words make master keys here, never on a node (the executor enables `build` only).

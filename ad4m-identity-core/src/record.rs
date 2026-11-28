@@ -1,6 +1,10 @@
 //! The private details record: device names, kinds, addresses, which devices hold the master
 //! key, and pending revocations, kept beside the log and never in it (spec section 17).
 //!
+//! A holder entry names its master key's index and the physical vault that keeps it
+//! ([`VaultId`]). Copies are vaults: two device keys on one shared vault are one copy, so the
+//! only-copy check counts distinct vault ids, and a `true` without a vault id proves no copy.
+//!
 //! A [`PrivateRecord`] is encrypted with XChaCha20-Poly1305 under a fresh 32-byte record key
 //! for every version; the record key is sealed with HPKE to the `enc` key of every valid device
 //! key of the log without the bot mark, and to the recovery key the words derive, when the
@@ -223,9 +227,58 @@ pub struct DeviceEntry {
     /// without it) is unknown: no proof that the device holds the current master key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub master_index: Option<u32>,
+    /// With `holdsMaster: true`: the id of the physical vault that keeps the copy
+    /// ([`VaultId`]), written by the device together with `masterIndex`. Several device keys
+    /// can use one vault (two apps on one computer), so two entries can name one copy. The
+    /// only-copy check counts distinct vault ids, never entries. A `true` without a vault id
+    /// proves no copy, as a `true` without `masterIndex`. Absent with `false` and `"offered"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault: Option<VaultId>,
     /// For an executor: who operates it, as a bare did:scid, when known.
     #[serde(default)]
     pub operator: Option<String>,
+}
+
+/// The id of one physical vault for one identity: 16 random bytes that the vault draws the
+/// first time it is asked for that identity and keeps. Every device key that uses the vault
+/// gets the same id for the same identity; two identities on one vault get two unrelated ids,
+/// so the record of one identity never links it to another. Not secret. Wire: base58btc of
+/// the 16 bytes, no multibase prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VaultId(pub [u8; 16]);
+
+impl std::fmt::Display for VaultId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&bs58::encode(self.0).into_string())
+    }
+}
+
+impl std::str::FromStr for VaultId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|e| format!("a vault id is base58btc: {e}"))?;
+        let bytes: [u8; 16] = bytes
+            .try_into()
+            .map_err(|b: Vec<u8>| format!("a vault id is 16 bytes, not {}", b.len()))?;
+        Ok(VaultId(bytes))
+    }
+}
+
+impl Serialize for VaultId {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for VaultId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
