@@ -122,7 +122,7 @@ async function open(opts: JoinOptions): Promise<Session> {
     session.on("participant-updated", () => receiveAll());
     session.on("stream-added", () => receiveAll());
     session.on("participant-left", (p: any) => { state.roster.delete(keyOf(p)); state.left.add(didOf(p)); state.departures += 1; });
-    session.on("replaced", () => { state.replaced = true; });
+    session.on("ended", (ended: { reason: string }) => { if (ended.reason === "replaced") state.replaced = true; });
     const debug = (line: string) => {
       if (process.env.E2E_DEBUG) console.log(`[e2e ${process.env.E2E_WHO}] ${new Date().toISOString().slice(17, 23)} ${line}`);
     };

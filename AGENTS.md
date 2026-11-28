@@ -485,8 +485,9 @@ room, and a room created again, continues it, so a roster from an earlier
 life of the room is older), so a client can drop a roster whose
 `revision` is older than one it already applied. The SDK
 keys participants by participant id from it; when the roster stops listing
-this session (its `participantId`) for 3 s and `sfu.callResume` does not list
-it either, the SDK rebuilds the call, but a replaced session never does; tracks are attributed only by the `trackMapping`
+this session (its `participantId`), the SDK asks `sfu.callResume` at once and
+rebuilds the call when the reply does not list it either (unless a roster
+newer than the ask lists it), but a replaced session never does; tracks are attributed only by the `trackMapping`
 mids (which name
 the participant id); a session never receives its own media or its own
 `sfu-data` (`senderParticipantId`), but does receive its agent's other
@@ -538,14 +539,14 @@ rooms lock, so a join that holds the lock counts, and it covers the resume
 roster publish as well as the command waiting for a slot in the bounded queue.
 on ICE `disconnected` or a network change the SDK restarts ICE in place (the
 SFU stays the only offerer: the restart comes as a server renegotiation
-offer), and rebuilds the call if that has not reconnected within 15 s; after
-a socket reconnect with no network change it restarts ICE only if ICE is not
-connected 2 s later; a failed connection is rebuilt at once, a rebuild
+offer), and the restart ends when ICE says `connected` or `failed`; after
+a socket reconnect the SDK asks `sfu.callResume`, and ICE state alone
+decides whether anything is restarted; a failed connection is rebuilt at once, a rebuild
 retries the join for 120 s, and either terminal give-up — the 120 s spent
 without a rejoin, or a 4th rebuild inside 2 min — ends the call, in this
 order: `participant-left` for each participant, then `error`, then the
 connection closes, the `sfu.callLeave` request starts (the end does not wait
-for its reply) and `call-ended` (`{ reason: "gave-up" }`, also on the
+for its reply) and `ended` (`{ reason: "gave-up", error }`, also on the
 `Session`, which goes idle) is emitted for the UI to show; a new `join`
 starts over. A rebuild keeps the participants and clears only their media:
 it refreshes `hasAudio` and `hasVideo`, then emits one `stream-removed` per
@@ -561,19 +562,26 @@ again from the cache when the executor resends its offer or the resume
 reply carries it. Once the socket is back, `sfu.callResume` returns what went by — the
 session's pending offer and the room's roster, applied like the events
 that carry them; a resume the socket fails keeps the call, and a 403 ends
-it (`call-ended`, `{ reason: "refused" }`: the executor refused the
+it (`ended`, `{ reason: "refused", error }`: the executor refused the
 resume — the session is another agent's, or this agent is no longer a
 member). Of the server offers waiting, only the newest
 is applied; no RPC runs on the offer queue (an answer is sent without
 waiting for its reply) and SDP steps run to their end; a resume's ask
-waits off the queue, bounded by `RESUME_STEP_TIMEOUT_MS` (10 s) and
-by the restart's remaining window when one is in flight, so the restart
-offer it triggers is answered while the reply is still out. The restart names the session's `participantId` (only that session
+waits off the queue, so the restart
+offer it triggers is answered while the reply is still out.
+The one timer in the call layer's recovery is the receive-stall watchdog
+(RTP statistics raise no event, so it polls them once a second): a
+connected call that sends media but has received none, and no sender
+report, for 5 s restarts ICE; a stall again after that restart rebuilds
+the call, counted in the rebuild budget. A call that sends nothing is never
+judged. The rejoin back-off of a rebuild stays a timer too: no event says
+the executor can take a join. Mesh calls keep their own media check
+(`MeshManager`). The restart names the session's `participantId` (only that session
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
-session out for 3 s asks `sfu.callResume` and rebuilds the call when its
+session out asks `sfu.callResume` and rebuilds the call when its
 reply says the session is not listed — an ask the socket fails is asked
-again within the grace while the roster still omits it; a roster that
+again by the next roster that still omits it; a roster that
 lists it, as during a restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may
@@ -605,8 +613,8 @@ request on a socket that keeps delivering fails as an RPC timeout, not a
 dead socket. A probe that gives up only redials, at once and without
 backoff — socket evidence is not a network change, so no `onNetworkChange`
 fires for it; `onReconnect` on the new socket is its signal, and the SFU
-answers that with `socketBack` (resend what a fault kept, `sfu.callResume`,
-`checkIceSoon`), not an immediate ICE restart. The call layer never probes
+answers that with `socketBack` (resend what a fault kept, `sfu.callResume`),
+not an immediate ICE restart. The call layer never probes
 the socket: ICE `disconnected` is media evidence, and its whole answer is
 the ICE restart.
 
@@ -757,7 +765,7 @@ kind without a word) never goes stale. Status writes are join, leave, and
 one repair when a poll finds a stale device of this agent (its links go) or
 this device's presence link or marker missing (a sibling took them out while it missed
 beats; they go back), at most once per 90 s; nothing is written over a
-status that reads as none. The beat stops on leave, destroy and `replaced`.
+status that reads as none. The beat stops on leave, destroy and `ended`.
 A tab reopened in the same browser profile keeps its device id
 (`localStorage`) and simply takes its links over. `sfu-browsers.test.ts` pins
 both: the same-profile rejoin lists the user once, and a dead second device

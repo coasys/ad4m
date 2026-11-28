@@ -1,4 +1,4 @@
-import { defaultDeviceId, SfuManager, SfuNeighbourhoodApi } from "./SfuManager"
+import { defaultDeviceId, SfuManager, SfuNeighbourhoodApi, type CallEnded } from "./SfuManager"
 import { agentOfMeshPeer, MeshManager, meshPeerId, type MeshParticipant, type SignallingChannel } from "./MeshManager"
 import type { OnlineAgent } from "../language/Language"
 import type {
@@ -29,17 +29,13 @@ export type SessionEvent =
     | "peer-recovery"
     | "state-changed"
     /**
-     * `(SfuSessionReplaced)` — the call was joined again from this device (another tab), and
-     * that join took it over: this session's call has ended, and it is idle again.
+     * `(CallEnded)` — the call ended without a `leave`, and does not come back by itself. The
+     * session is idle; show the reason and offer to join again. `reason` is `replaced` when
+     * this device joined the call again (another tab) and that join took it over,
+     * `gave-up` when the SFU call could not be rebuilt, and `refused` when the executor said
+     * this session is another agent's.
      */
-    | "replaced"
-    /**
-     * `(SfuCallEnded)` — the SFU call ended on its own: it could not be rebuilt
-     * (`reason: "gave-up"`), or the executor said this session is another
-     * agent's (`reason: "refused"`). The session is idle; show the reason and
-     * offer to join again.
-     */
-    | "call-ended"
+    | "ended"
     | "error"
 
 export type SessionEventCallback = (...args: any[]) => void
@@ -48,7 +44,7 @@ export type SessionEventCallback = (...args: any[]) => void
 export interface Session {
     /**
      * Connect to the room with local media. Resolves when the session becomes active, or
-     * idle if another tab on this device replaced the call while it joined (`replaced`).
+     * idle if another tab on this device replaced the call while it joined (`ended`, reason `replaced`).
      */
     join(localStream: MediaStream): Promise<void>
     /** Disconnect from the room. The session returns to idle and can rejoin. */
@@ -530,7 +526,7 @@ export function createSession(config: SessionImplConfig): Session {
      * Listen for this device joining the same mesh call from another tab,
      * and tell any tab already in it. Both tabs are one peer, so only one
      * can hold the call: the earlier lets go, without withdrawing the
-     * presence link the two share, and says `replaced`.
+     * presence link the two share, and says `ended` with reason `replaced`.
      */
     function claimDevice(mesh: MeshManager): void {
         sameDevice = sameDeviceChannel(agentDid, device, roomId)
@@ -547,7 +543,10 @@ export function createSession(config: SessionImplConfig): Session {
             void mesh.leave()
             // Idle before listeners hear it: one may join again at once.
             setState("idle")
-            emit("replaced", { targetDid: agentDid, neighbourhoodUrl, roomName: roomId, participantId: selfPeer })
+            emit("ended", {
+                reason: "replaced",
+                session: { targetDid: agentDid, neighbourhoodUrl, roomName: roomId, participantId: selfPeer },
+            } satisfies CallEnded)
         }
         channel.postMessage({ joined: true })
     }
@@ -577,25 +576,17 @@ export function createSession(config: SessionImplConfig): Session {
             if (!current()) return
             emit("stream-removed", stream, track)
         })
-        // The call could not be kept up and ended (the rebuild budget ran out).
-        // The manager has stopped; the session is idle and may join again.
-        sfu.on("call-ended", (event: unknown) => {
+        // The call ended without a leave: it could not be kept up (the rebuild
+        // budget ran out), the executor refused the session, or another tab on
+        // this device took it over. The manager has stopped and will not rejoin;
+        // the session is idle and may join again.
+        sfu.on("ended", (event: CallEnded) => {
             if (sfuManager !== sfu) return
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
             sfuManager = null
             // Idle before listeners hear it: one may join again at once.
             setState("idle")
-            emit("call-ended", event)
-        })
-        // Another tab on this device took the call over. The manager has stopped
-        // and will not rejoin; the session is idle and may join again.
-        sfu.on("replaced", (event: unknown) => {
-            if (sfuManager !== sfu) return
-            if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
-            sfuManager = null
-            // Idle before listeners hear it: one may join again at once.
-            setState("idle")
-            emit("replaced", event)
+            emit("ended", event)
         })
     }
 
