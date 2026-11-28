@@ -30,8 +30,8 @@ use super::link_author::{
     side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
-    ContainedScope, IdsFirst, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection,
-    Scope, ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    ContainedScope, InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
@@ -229,7 +229,7 @@ pub(super) fn build_instance_sparql(
             SortKey::Timestamp if pg.keyset.is_some() => {
                 suffix.push_str(&keyset_suffix(pg.direction, pg.keyset.as_ref().unwrap()));
             }
-            SortKey::Timestamp | SortKey::CreatedAt => match pg.direction {
+            SortKey::Timestamp => match pg.direction {
                 OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
                 OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
             },
@@ -296,7 +296,6 @@ pub(super) fn build_instance_sparql(
         };
 
     if let Some(pg) = sparql_pagination {
-        let mut ids_first: Option<IdsFirst> = None;
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
                 // The probe goes first: see `build_timestamp_probe` for why the
@@ -308,27 +307,6 @@ pub(super) fn build_instance_sparql(
 {conformance}
 {where_extra}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
-                )
-            }
-            SortKey::CreatedAt => {
-                let links = hydrated_links(shape, query, &predicate_filter);
-                // Only where the ids alone are the answer: a per-anchor page groups by the
-                // anchor too, which the ids query does not return.
-                if !conformance.trim().is_empty() && anchor_select.is_empty() {
-                    ids_first = Some(IdsFirst {
-                        // `isIRI`: a literal target the conformance binds is no instance, and
-                        // its text would read back as the node it names.
-                        ids_query: format!(
-                            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\nFILTER(isIRI(?source))\n}}"
-                        ),
-                        replaces: format!("\n{conformance}\n"),
-                    });
-                }
-                format!(
-                    r#"SELECT DISTINCT ?source{anchor_select} (MIN(?timestamp) AS ?_first_ts) WHERE {{
-{conformance}
-{where_extra}
-{links}        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Property(predicate) => {
@@ -379,48 +357,89 @@ pub(super) fn build_instance_sparql(
         InstanceQueryPlan::TwoPhase {
             pagination_subquery: subquery_body,
             predicate_filter,
-            ids_first,
         }
     } else {
-        let links = hydrated_links(shape, query, &predicate_filter);
-        if conformance.trim().is_empty() {
-            InstanceQueryPlan::Single(format!(
-                r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
+        match ids_query_of(&conformance, &where_extra) {
+            // A kind with a membership check reads its ids first, then their links: the
+            // two-phase plan with no window.
+            Some(ids_query) => InstanceQueryPlan::TwoPhase {
+                pagination_subquery: ids_query,
+                predicate_filter,
+            },
+            None => {
+                let links = hydrated_links(shape, query, &predicate_filter);
+                InstanceQueryPlan::Single(format!(
+                    r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {where_extra}
 {links}}}"#
-            ))
-        } else {
-            InstanceQueryPlan::IdsThenLinks {
-                // `isIRI`: a literal target the conformance binds is no instance, and its text
-                // would read back as the node it names (the single plan's links filter it too).
-                ids_query: format!(
-                    r#"SELECT DISTINCT ?source WHERE {{
-{conformance}
-{where_extra}
-FILTER(isIRI(?source))
-}}"#
-                ),
-                links,
+                ))
             }
         }
     }
 }
 
-/// The second half of [`InstanceQueryPlan::IdsThenLinks`]: the links of `ids`,
-/// in the single plan's row form.
-pub(super) fn links_of_ids(ids: &[String], links: &str) -> String {
-    let source_constraint = super::utils::values_or_str_filter("source", ids);
+/// The ids a read selects, apart from their links: the membership check and the `where`.
+/// `None` when the shape has no membership check, so the links are all that selects.
+///
+/// Oxigraph orders a join by how many terms each pattern binds, with no statistics. With the
+/// membership check, the predicate list and the link patterns in one query it begins from the
+/// links of every record that shares a predicate with the kind and joins the ids last: 803 ms
+/// for 1,531 tasks, against about 215 ms with the ids found first and their links bound by
+/// `VALUES`. A sub-select does not hold the order: Oxigraph plans it as part of the join
+/// (about twice as slow as two queries).
+///
+/// Ordered by id, the order hydration gave an unpaged read. `isIRI`: a literal target the
+/// membership check binds is no instance, and its text would read back as the node it names.
+fn ids_query_of(conformance: &str, where_extra: &str) -> Option<String> {
+    (!conformance.trim().is_empty()).then(|| {
+        format!(
+            "SELECT DISTINCT ?source WHERE {{\n{conformance}\n{where_extra}\nFILTER(isIRI(?source))\n}} ORDER BY ASC(?source)"
+        )
+    })
+}
+
+/// [`ids_query_of`] for a read's own shape and input.
+pub(super) fn ids_query(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: Option<&dyn ShapeResolver>,
+) -> Option<String> {
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    ids_query_of(&conformance, &where_extra)
+}
+
+/// Every instance with its creation time as `?_first_ts`, earliest first: the earliest of the
+/// links hydration reads, under its filters, which is the `timestamp` / `createdAt` its row
+/// carries. Not the order of [`SortKey::Timestamp`], whose probe reads one conformance link (the
+/// flag) and so can be later. A union over several classes orders on this, so every class's
+/// creation time is the value its rows carry.
+///
+/// Over `ids` (the rows of [`ids_query`]) where the read has a membership check, else over the
+/// patterns that select.
+pub(super) fn created_at_query(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: Option<&dyn ShapeResolver>,
+    ids: Option<&[String]>,
+) -> String {
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let selecting = match ids {
+        Some(ids) => super::utils::values_or_str_filter("source", ids),
+        None => format!("{conformance}\n{where_extra}"),
+    };
+    let predicate_filter = super::utils::predicate_in_filter(&instance_link_predicates(shape));
+    let links = hydrated_links(shape, query, &predicate_filter);
     format!(
-        r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
-    {source_constraint}
-{links}}}"#
+        r#"SELECT DISTINCT ?source (MIN(?timestamp) AS ?_first_ts) WHERE {{
+{selecting}
+{links}}} GROUP BY ?source ORDER BY ASC(?_first_ts) ASC(?source)"#
     )
 }
 
 /// The links the single plan hydrates an instance from, each bound as
 /// `?source ?predicate ?target` with its `?author` and `?timestamp`: the
 /// shape's predicates (`predicate_filter`), under the read's link status,
-/// proof and `local` filters. [`SortKey::CreatedAt`] takes its `MIN` over the
+/// proof and `local` filters. [`created_at_query`] takes its `MIN` over the
 /// same links, so it is the `timestamp` / `createdAt` the hydrated row carries.
 fn hydrated_links(shape: &ModelShape, query: &ModelQueryInput, predicate_filter: &str) -> String {
     let local_status = local_status_filter(shape);
@@ -487,7 +506,7 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
         None => String::new(),
         Some(s) => format!(
             "   {}\n",
-            annotation_is("?_reifier", "status", "_st", status_str(s))
+            annotation_is("?_reifier", "status", status_str(s))
         ),
     }
 }
@@ -533,10 +552,7 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> String {
     if include_unverified.unwrap_or(false) {
         String::new()
     } else {
-        format!(
-            "   {}\n",
-            annotation_is("?_reifier", "proofValid", "_pv", "true")
-        )
+        format!("   {}\n", annotation_is("?_reifier", "proofValid", "true"))
     }
 }
 
@@ -554,10 +570,10 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> String {
 /// Same rows: the reifier has one value per annotation, and the filter keeps
 /// exactly the rows the constant matched.
 ///
-/// The variable is the reifier's name with `suffix`, so two guarded reifiers in
+/// The variable is the reifier's name and the annotation's, so two guarded reifiers in
 /// one query never share it.
-pub(super) fn annotation_is(reifier: &str, name: &str, suffix: &str, value: &str) -> String {
-    let var = format!("{reifier}{suffix}");
+pub(super) fn annotation_is(reifier: &str, name: &str, value: &str) -> String {
+    let var = format!("{reifier}_{name}");
     format!(" {reifier} <ad4m://ontology/{name}> {var} . FILTER({var} = \"{value}\")")
 }
 
@@ -607,10 +623,10 @@ impl<'a> LinkGuard<'a> {
     pub(super) fn on_reifier(&self, reifier: &str) -> String {
         let mut out = String::new();
         if let Some(s) = self.status {
-            out.push_str(&annotation_is(reifier, "status", "_st", status_str(s)));
+            out.push_str(&annotation_is(reifier, "status", status_str(s)));
         }
         if !self.include_unverified.unwrap_or(false) {
-            out.push_str(&annotation_is(reifier, "proofValid", "_pv", "true"));
+            out.push_str(&annotation_is(reifier, "proofValid", "true"));
         }
         out
     }
@@ -2065,7 +2081,7 @@ mod tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            _ => panic!("Expected TwoPhase query plan, got Single"),
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
         }
     }
 
@@ -2209,12 +2225,8 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
-        let sparql = match plan {
-            InstanceQueryPlan::Single(q) => q,
-            InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
-            InstanceQueryPlan::IdsThenLinks { ids_query, links } => format!("{ids_query}\n{links}"),
-        };
+        let sparql =
+            build_instance_sparql(&s, &ModelQueryInput::default(), None, None).into_single();
         assert!(
             !sparql.contains("<true>"),
             "must not inline a non-IRI initial as an IRIREF: {sparql}"
@@ -2225,12 +2237,8 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
-        let sparql = match plan {
-            InstanceQueryPlan::Single(q) => q,
-            InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
-            InstanceQueryPlan::IdsThenLinks { ids_query, links } => format!("{ids_query}\n{links}"),
-        };
+        let sparql =
+            build_instance_sparql(&s, &ModelQueryInput::default(), None, None).into_single();
         assert!(
             sparql.contains("<todo://yes>"),
             "a parseable initial stays inlined: {sparql}"
@@ -3505,7 +3513,7 @@ mod traverse_scope_tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            _ => panic!("Expected TwoPhase query plan, got Single"),
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
         };
 
         assert!(
@@ -3532,7 +3540,7 @@ mod traverse_scope_tests {
                 pagination_subquery,
                 ..
             } => pagination_subquery,
-            _ => panic!("Expected TwoPhase query plan, got Single"),
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
         };
 
         assert!(

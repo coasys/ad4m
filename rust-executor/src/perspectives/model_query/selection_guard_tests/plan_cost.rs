@@ -6,8 +6,7 @@
 //! many terms a pattern binds, with no statistics, and in one query holding the
 //! membership check, the predicate list and the guard it started from those and
 //! joined the ids last. The plan now asks for the ids first and binds the rest
-//! as variables (see `annotation_is`, `predicate_in_filter`,
-//! `InstanceQueryPlan::IdsThenLinks`, `IdsFirst`).
+//! as variables (see `annotation_is`, `predicate_in_filter`, `ids_query_of`).
 
 use super::{add, signed};
 use crate::agent::signatures::TestSigner;
@@ -107,66 +106,79 @@ async fn a_kind_read_returns_its_own_records_beside_kinds_sharing_its_predicates
     }
 }
 
-/// The links of every task, as one query in the form the builder wrote before:
-/// the membership check, the predicate list as `VALUES` and the guard as
-/// constants, all together.
-fn old_single_query() -> String {
-    let r = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
-    format!(
-        "SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
-    ?source <pc://flag> <pc://task> . ?_r1 <{r}> <<( ?source <pc://flag> <pc://task> )>> . ?_r1 <ad4m://ontology/proofValid> \"true\" .
-    ?source <pc://title> ?_cf . ?_r2 <{r}> <<( ?source <pc://title> ?_cf )>> . ?_r2 <ad4m://ontology/proofValid> \"true\" .
-    VALUES ?predicate {{ <pc://flag> <pc://priority> <pc://status> <pc://title> }}
-    ?source ?predicate ?target .
-    ?_reifier <{r}> <<( ?source ?predicate ?target )>> .
-    FILTER(isIRI(?source) && isIRI(?predicate))
-    ?_reifier <ad4m://ontology/author> ?author .
-    ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-    ?_reifier <ad4m://ontology/proofValid> \"true\" .
-}}"
-    )
-}
-
-/// Times a kind's read against the form it replaced, on 1,500 tasks beside
-/// 6,000 records of another kind. Ignored: a timing is a measurement, not an
-/// assertion CI can hold. Run with
-/// `cargo test --release --lib -- --ignored --nocapture plan_cost_against_the_old_form`.
+/// Median time of four reads on 1,500 tasks beside 6,000 notes, and the store queries each one
+/// ran. Ignored: a timing is a measurement. Run with
+/// `cargo test --release --lib -- --ignored --nocapture plan_cost_by_read`.
 #[tokio::test]
 #[ignore]
-async fn plan_cost_against_the_old_form() {
+async fn plan_cost_by_read() {
     let store = seeded(1500, 6000);
-    let stop = EvalStop::none();
-    let median = |mut runs: Vec<std::time::Duration>| {
-        runs.sort();
-        runs[runs.len() / 2]
-    };
+    for (name, query, rows) in [
+        ("unpaged", json!({}), 1500),
+        (
+            "createdAt page",
+            json!({ "order": { "createdAt": "ASC" }, "limit": 50 }),
+            50,
+        ),
+        (
+            "where status",
+            json!({ "where": { "status": "todo" } }),
+            1500,
+        ),
+    ] {
+        measure(&store, name, rows, || async {
+            tasks(&store, query.clone()).await.len()
+        })
+        .await;
+    }
 
-    let mut old = Vec::new();
-    let mut old_rows = 0;
-    for _ in 0..5 {
+    // The id phase a union reads per class: every id, ordered by `createdAt`.
+    let (resolver, shape) =
+        crate::perspectives::model_query::test_helpers::StaticShapeResolver::from_json(
+            "Task",
+            TASK_SHAPE_JSON,
+        )
+        .unwrap();
+    let all = ModelQueryInput::default();
+    measure(&store, "createdAt ids", 1500, || async {
+        crate::perspectives::model_query::query::select_ids(
+            &EvalStop::none(),
+            &store,
+            &shape,
+            &all,
+            &resolver,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .len()
+    })
+    .await;
+}
+
+/// Runs `read` seven times, checks it returns `rows` rows, and prints the store queries of the
+/// first run and the median time.
+async fn measure<F, Fut>(store: &SparqlStore, name: &str, rows: usize, read: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = usize>,
+{
+    let mut runs = Vec::new();
+    for run in 0..7 {
+        let before = store.queries_run().len();
         let start = std::time::Instant::now();
-        let rows: Vec<Value> =
-            serde_json::from_str(&store.query(&stop, &old_single_query()).unwrap()).unwrap();
-        old.push(start.elapsed());
-        old_rows = rows.len();
+        assert_eq!(read().await, rows, "{name}");
+        runs.push(start.elapsed());
+        if run == 0 {
+            for q in &store.queries_run()[before..] {
+                let shown = q.split_whitespace().collect::<Vec<_>>().join(" ");
+                eprintln!("SPARQL [{name}]: {}", &shown[..shown.len().min(1500)]);
+            }
+        }
     }
-    let mut new = Vec::new();
-    for _ in 0..5 {
-        let start = std::time::Instant::now();
-        let got = tasks(&store, json!({})).await;
-        new.push(start.elapsed());
-        assert_eq!(got.len(), 1500);
-    }
-    let (old, new) = (median(old), median(new));
-    eprintln!(
-        "plan cost, 1,500 tasks beside 6,000 notes: the old single query {old:?} ({old_rows} rows); \
-         the whole read now, hydration included, {new:?}"
-    );
-    assert_eq!(old_rows, 6000, "four links a task");
-    assert!(
-        new < old,
-        "the whole read now should beat the old query alone"
-    );
+    runs.sort();
+    eprintln!("MEDIAN [{name}]: {:?}", runs[runs.len() / 2]);
 }
 
 /// A record with an optional title only: under a parent scope, nothing but the parent link
@@ -180,7 +192,7 @@ const ITEM_SHAPE_JSON: &str = r#"{
 
 /// A parent holding one record and one literal whose text is the address of another node with a
 /// title: the literal is no member, and the node it names is not read in its place, whichever
-/// plan reads the ids (the unpaged ids-then-links, the `createdAt` page's ids first).
+/// read asks for the ids (the unpaged read, a `createdAt` page, a union's creation-time order).
 #[tokio::test]
 async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
     let store = SparqlStore::new(None).unwrap();
@@ -221,15 +233,15 @@ async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
     }
 }
 
-/// The two plans the kind read now runs, pinned by their form: an unpaged read of a kind whose
-/// membership is checked asks for the ids alone and then the links of those ids only; a
-/// `createdAt` page asks for the ids first and puts them in place of the membership check.
+/// The form of the kind read, pinned: the ids are asked for apart from their links, and the
+/// links are then bound to the ids found, whether the read is unpaged or a union's creation-time
+/// order. The membership check is not repeated beside the links.
 #[test]
 fn a_kind_read_asks_for_its_ids_apart_from_their_links() {
-    use crate::perspectives::model_query::sparql_builder::{build_instance_sparql, links_of_ids};
-    use crate::perspectives::model_query::types::{
-        InstanceQueryPlan, OrderDirection, SortKey, SparqlPagination,
+    use crate::perspectives::model_query::sparql_builder::{
+        build_instance_sparql, created_at_query, ids_query,
     };
+    use crate::perspectives::model_query::types::InstanceQueryPlan;
     let (_resolver, shape) =
         crate::perspectives::model_query::test_helpers::StaticShapeResolver::from_json(
             "Task",
@@ -237,50 +249,25 @@ fn a_kind_read_asks_for_its_ids_apart_from_their_links() {
         )
         .unwrap();
     let all = ModelQueryInput::default();
+    let ids = ids_query(&shape, &all, None).expect("a checked kind has an id query");
+    assert!(ids.contains("?source <pc://flag> <pc://task>"), "{ids}");
+    assert!(!ids.contains("?predicate"), "no link in the ids: {ids}");
+    assert!(ids.contains("FILTER(isIRI(?source))"), "{ids}");
 
-    let InstanceQueryPlan::IdsThenLinks { ids_query, links } =
-        build_instance_sparql(&shape, &all, None, None)
-    else {
-        panic!("an unpaged read of a checked kind reads its ids first");
-    };
-    assert!(
-        !ids_query.contains("?predicate"),
-        "the id query fetches no links: {ids_query}"
-    );
-    assert!(ids_query.contains("FILTER(isIRI(?source))"), "{ids_query}");
-    let second = links_of_ids(&["pc://task-00001".to_string()], &links);
-    assert!(
-        second.contains("<pc://task-00001>") && !second.contains("<pc://flag> <pc://task>"),
-        "the links query is bound to the ids found, not the membership check: {second}"
-    );
-
-    let page = SparqlPagination {
-        sort_key: SortKey::CreatedAt,
-        direction: OrderDirection::ASC,
-        offset: None,
-        limit: Some(10),
-        keyset: None,
-    };
     let InstanceQueryPlan::TwoPhase {
         pagination_subquery,
-        ids_first: Some(first),
         ..
-    } = build_instance_sparql(&shape, &all, Some(&page), None)
+    } = build_instance_sparql(&shape, &all, None, None)
     else {
-        panic!("a createdAt page of a checked kind reads its ids first");
+        panic!("an unpaged read of a checked kind is its ids, then their links");
     };
+    assert_eq!(pagination_subquery, ids);
+
+    let created_at = created_at_query(&shape, &all, None, Some(&["pc://task-00001".to_string()]));
     assert!(
-        !first.ids_query.contains("?predicate"),
-        "{}",
-        first.ids_query
-    );
-    assert!(
-        first.ids_query.contains("FILTER(isIRI(?source))"),
-        "{}",
-        first.ids_query
-    );
-    assert!(
-        pagination_subquery.contains(&first.replaces),
-        "the page query holds the check the ids replace: {pagination_subquery}"
+        created_at.contains("VALUES ?source { <pc://task-00001> }")
+            && created_at.contains("?source ?predicate ?target")
+            && !created_at.contains("?source <pc://flag> <pc://task>"),
+        "the links are bound to the ids found, not the membership check: {created_at}"
     );
 }

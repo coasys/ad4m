@@ -80,11 +80,11 @@ fn the_guard_checks_stay_on_the_probe_reifier() {
     };
     let probe = build_timestamp_probe(&s, guard);
     assert!(
-        probe.contains(&annotation_is("?_r", "status", "_st", "Shared")),
+        probe.contains(&annotation_is("?_r", "status", "Shared")),
         "status check on the probe reifier: {probe}"
     );
     assert!(
-        probe.contains(&annotation_is("?_r", "proofValid", "_pv", "true")),
+        probe.contains(&annotation_is("?_r", "proofValid", "true")),
         "verdict check on the probe reifier: {probe}"
     );
 }
@@ -103,7 +103,7 @@ fn id_phase(s: &super::types::ModelShape, q: &ModelQueryInput) -> String {
             pagination_subquery,
             ..
         } => pagination_subquery,
-        _ => panic!("expected a paged plan"),
+        InstanceQueryPlan::Single(sparql) => panic!("expected a paged plan: {sparql}"),
     }
 }
 

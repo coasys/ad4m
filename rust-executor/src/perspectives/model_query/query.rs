@@ -19,13 +19,13 @@ use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
-    ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, created_at_query, ids_query,
+    level_limits, link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter,
+    LinkGuard, ANCHOR_VAR,
 };
 use super::types::{
-    IdsFirst, InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
-    Scope, ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
+    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
@@ -464,12 +464,19 @@ pub async fn execute_model_query_stopped(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    let timing = crate::perspectives::sparql_store::query_timing::ModelTiming::start(
-        &shape.target_class,
-        query_input,
-    );
+    // `query_timing` (see `SparqlStore::query`): the input is formatted only when it is logged.
+    let started =
+        log::log_enabled!(target: "query_timing", log::Level::Debug).then(std::time::Instant::now);
     let result = execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await;
-    timing.done(result.as_ref().map(|r| r.instances.len()).unwrap_or(0));
+    if let Some(started) = started {
+        log::debug!(
+            target: "query_timing",
+            "model {}ms class={} query={}",
+            started.elapsed().as_millis(),
+            shape.target_class,
+            crate::perspectives::sparql_store::one_line(&format!("{query_input:?}"))
+        );
+    }
     result
 }
 
@@ -537,10 +544,9 @@ fn refuse_unanswerable_scope(query_input: &ModelQueryInput) -> Result<(), Error>
 
 /// The id phase of [`execute_model_query_inner`] on its own: every record in
 /// scope that passes `where`, as the rows of the two-phase plan's first query
-/// with no window — `?source` and the binding `sort_key` sorts on
-/// (`?_first_ts` for [`SortKey::Timestamp`] and [`SortKey::CreatedAt`],
-/// `?_sort_num` / `?_sort_str` for
-/// [`SortKey::Property`]). Nothing is hydrated. A union over several classes
+/// with no window — `?source` and the binding the order sorts on: `?_sort_num` /
+/// `?_sort_str` for the value of `property`, or `?_first_ts`, the creation time, with
+/// none (see [`created_at_query`]). Nothing is hydrated. A union over several classes
 /// pages on these and hydrates only its page.
 ///
 /// `None` when the store cannot answer the read on its own: a `where` that is
@@ -552,7 +558,7 @@ pub(super) async fn select_ids(
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
-    sort_key: SortKey,
+    property: Option<&str>,
 ) -> Result<Option<Vec<Value>>, Error> {
     refuse_unanswerable_scope(query_input)?;
     let walked_input = with_walk(stop, store, query_input)?;
@@ -564,8 +570,30 @@ pub(super) async fn select_ids(
     {
         return Ok(None);
     }
+    let Some(predicate) = property else {
+        // The kind's ids first, then their creation times (see `ids_query_of`).
+        let ids = match ids_query(shape, query_input, Some(resolver)) {
+            Some(ids_query) => {
+                let rows: Vec<Value> =
+                    serde_json::from_str(&store.query_async(stop, &ids_query).await?)?;
+                let ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r["source"].as_str().map(str::to_string))
+                    .collect();
+                if ids.is_empty() {
+                    return Ok(Some(vec![]));
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+        let sparql = created_at_query(shape, query_input, Some(resolver), ids.as_deref());
+        return Ok(Some(serde_json::from_str(
+            &store.query_async(stop, &sparql).await?,
+        )?));
+    };
     let pagination = SparqlPagination {
-        sort_key,
+        sort_key: SortKey::Property(predicate.to_string()),
         direction: OrderDirection::ASC,
         offset: None,
         limit: None,
@@ -573,40 +601,13 @@ pub(super) async fn select_ids(
     };
     let InstanceQueryPlan::TwoPhase {
         pagination_subquery,
-        ids_first,
         ..
     } = build_instance_sparql(shape, query_input, Some(&pagination), Some(resolver))
     else {
         return Ok(None);
     };
-    let rows_json = run_page_query(stop, store, &pagination_subquery, ids_first.as_ref()).await?;
+    let rows_json = store.query_async(stop, &pagination_subquery).await?;
     Ok(Some(serde_json::from_str(&rows_json)?))
-}
-
-/// Run a two-phase plan's page query, through its [`IdsFirst`] step where it
-/// has one: the membership check on its own, then the page over the ids it
-/// found. The rows are the page query's either way.
-async fn run_page_query(
-    stop: &EvalStop,
-    store: &SparqlStore,
-    pagination_subquery: &str,
-    ids_first: Option<&IdsFirst>,
-) -> Result<String, Error> {
-    let Some(first) = ids_first else {
-        return store.query_async(stop, pagination_subquery).await;
-    };
-    let id_rows: Vec<Value> =
-        serde_json::from_str(&store.query_async(stop, &first.ids_query).await?)?;
-    let ids: Vec<String> = id_rows
-        .iter()
-        .filter_map(|r| r["source"].as_str().map(str::to_string))
-        .collect();
-    if ids.is_empty() {
-        return Ok("[]".to_string());
-    }
-    let values = values_or_str_filter("source", &ids);
-    let page = pagination_subquery.replacen(&first.replaces, &format!("\n    {values}\n"), 1);
-    store.query_async(stop, &page).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -915,24 +916,9 @@ pub(super) async fn execute_model_query_inner(
             let result_json = store.query_async(stop, &sparql).await?;
             serde_json::from_str(&result_json)?
         }
-        InstanceQueryPlan::IdsThenLinks { ids_query, links } => {
-            let id_rows: Vec<Value> =
-                serde_json::from_str(&store.query_async(stop, &ids_query).await?)?;
-            let ids: Vec<String> = id_rows
-                .iter()
-                .filter_map(|r| r["source"].as_str().map(str::to_string))
-                .collect();
-            if ids.is_empty() {
-                vec![]
-            } else {
-                let sparql = super::sparql_builder::links_of_ids(&ids, &links);
-                serde_json::from_str(&store.query_async(stop, &sparql).await?)?
-            }
-        }
         InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             predicate_filter,
-            ids_first,
         } => {
             // Phase one either asks once, or walks a level at a time — the difference being where
             // the ids come from. Phase two is the same either way: one hydration for whatever it
@@ -956,9 +942,7 @@ pub(super) async fn execute_model_query_inner(
                     .await?
                 }
                 _ => {
-                    let page_json =
-                        run_page_query(stop, store, &pagination_subquery, ids_first.as_ref())
-                            .await?;
+                    let page_json = store.query_async(stop, &pagination_subquery).await?;
                     let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
                     if let Some(n) = anchor_limit {
                         slice_per_anchor(&mut page_results, n);
