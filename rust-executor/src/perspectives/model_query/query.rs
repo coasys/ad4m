@@ -968,20 +968,14 @@ pub(super) async fn execute_model_query_inner(
             if ordered_ids.is_empty() {
                 vec![]
             } else {
-                let source_ids: Vec<String> = ordered_ids
-                    .iter()
-                    .filter_map(|s| validate_iri(s).ok().map(|s| s.to_string()))
-                    .collect();
-
-                if source_ids.is_empty() {
-                    vec![]
-                } else {
-                    let source_constraint = values_or_str_filter("source", &source_ids);
-                    let local_status = local_status_filter(shape);
-                    let link_status = link_status_filter(query_input.link_status.as_ref());
-                    let proof_valid = proof_valid_filter(query_input.include_unverified);
-                    let property_sparql = format!(
-                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+                // Every id the store answered, whatever its text: an id that cannot sit in `<…>`
+                // (a space, a quote) is matched by `STR`, escaped.
+                let source_constraint = values_or_str_filter("source", &ordered_ids);
+                let local_status = local_status_filter(shape);
+                let link_status = link_status_filter(query_input.link_status.as_ref());
+                let proof_valid = proof_valid_filter(query_input.include_unverified);
+                let property_sparql = format!(
+                    r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -989,10 +983,9 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}{local_status}}}"#
-                    );
-                    let result_json = store.query_async(stop, &property_sparql).await?;
-                    serde_json::from_str(&result_json)?
-                }
+                );
+                let result_json = store.query_async(stop, &property_sparql).await?;
+                serde_json::from_str(&result_json)?
             }
         }
     };

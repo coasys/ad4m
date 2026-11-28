@@ -249,6 +249,35 @@ async fn a_literal_target_is_not_read_as_the_node_its_text_names() {
     }
 }
 
+/// A record whose id is no IRI the query text may hold (a space in it) is read with its fields,
+/// unpaged as on a page: the write path stores such ids, and the hydration matches them by text.
+#[tokio::test]
+async fn a_record_whose_id_holds_a_space_is_read_with_its_fields() {
+    let store = SparqlStore::new(None).unwrap();
+    let me = TestSigner::generate();
+    add(
+        &store,
+        [
+            signed(&me, "pc://parent", "pc://child", "pc://task 1", 1),
+            signed(&me, "pc://task 1", "pc://title", "literal:string:spaced", 1),
+        ],
+    );
+    let scope = json!({ "id": "pc://parent", "predicate": "pc://child" });
+    for query in [
+        json!({ "parent": scope }),
+        json!({ "parent": scope, "order": { "createdAt": "ASC" }, "limit": 10 }),
+    ] {
+        let input: ModelQueryInput = serde_json::from_value(query.clone()).unwrap();
+        let got = execute_model_query_from_json(&store, "Item", &input, ITEM_SHAPE_JSON)
+            .await
+            .unwrap()
+            .instances;
+        assert_eq!(got.len(), 1, "{query}: {got:?}");
+        assert_eq!(got[0]["id"], "pc://task 1", "{query}: {got:?}");
+        assert_eq!(got[0]["title"], "spaced", "{query}: {got:?}");
+    }
+}
+
 /// The same read over two classes, in a union's id phase and with its creation-time order.
 #[tokio::test]
 async fn a_union_does_not_read_a_literal_target_as_the_node_its_text_names() {
