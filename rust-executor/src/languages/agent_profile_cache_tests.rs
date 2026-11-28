@@ -13,14 +13,17 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// A language the test plays: `expressionGet(did)` answers `profiles[did]` (JSON text; absent
-/// means `null`, `"ERR"` means the call fails), `expressionCreate` answers an address.
+/// means `null`, `"ERR"` means the call fails), `expressionCreate` answers an address. A DID
+/// put on hold (`hold`) gets the answer read when the call came, sent only on release.
 #[derive(Clone, Default)]
 struct FakeLanguage {
     profiles: Arc<Mutex<HashMap<String, String>>>,
     gets: Arc<AtomicUsize>,
+    held: Arc<Mutex<HashMap<String, oneshot::Receiver<()>>>>,
 }
 
 impl FakeLanguage {
@@ -33,6 +36,13 @@ impl FakeLanguage {
 
     fn gets(&self) -> usize {
         self.gets.load(Ordering::SeqCst)
+    }
+
+    /// Holds the next `expressionGet(did)` answer until the returned sender fires.
+    fn hold(&self, did: &str) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.held.lock().unwrap().insert(did.to_string(), held);
+        release
     }
 
     /// Serves `address` from this fake; the returned guard-less handle is torn down by `drop_language`.
@@ -50,6 +60,7 @@ impl FakeLanguage {
                 let LanguageOperation::Execute(script, ..) = &request.operation else {
                     continue;
                 };
+                let mut held = None;
                 let answer = if script.contains("isImmutableExpression") {
                     Ok("false".to_string())
                 } else if script.contains("expressionGet(") {
@@ -60,6 +71,7 @@ impl FakeLanguage {
                         .and_then(|rest| rest.split(')').next())
                         .and_then(|arg| serde_json::from_str::<String>(arg).ok())
                         .expect("a DID argument");
+                    held = this.held.lock().unwrap().remove(&did);
                     match this.profiles.lock().unwrap().get(&did).map(String::as_str) {
                         Some("ERR") => Err("the store is down".to_string()),
                         Some(text) => Ok(text.to_string()),
@@ -70,7 +82,17 @@ impl FakeLanguage {
                 } else {
                     Err(format!("unexpected script: {script}"))
                 };
-                let _ = request.response_tx.send(answer);
+                match held {
+                    Some(held) => {
+                        tokio::spawn(async move {
+                            let _ = held.await;
+                            let _ = request.response_tx.send(answer);
+                        });
+                    }
+                    None => {
+                        let _ = request.response_tx.send(answer);
+                    }
+                }
             }
         });
     }
@@ -222,16 +244,101 @@ async fn creating_an_expression_in_the_agent_language_drops_the_authors_entry() 
 
 #[tokio::test(start_paused = true)]
 async fn a_put_of_an_identity_record_drops_the_entry() {
+    use crate::identity::backend::{AgentLanguageBackend, IdentityBackend};
     let (controller, address, fake, previous) = agent_language().await;
     fake.set("did:test:a", &profile("old"));
     get(&controller, &address, "did:test:a").await;
     fake.set("did:test:a", &profile("new"));
 
-    controller.forget_agent_profile("did:test:a").await;
+    // The fake serves no identity capability, so the put itself fails: a put that reports a
+    // failure still drops the entry (it may have been applied).
+    let record = ad4m_ldk::identity::AgentRecord {
+        did: "did:test:a".to_string(),
+        profile: json!({}),
+        version: 1,
+        signed_by: "did:test:a".to_string(),
+        anchor: None,
+        sig: String::new(),
+    };
+    let _ = AgentLanguageBackend.put_agent(&record, None).await;
     let after = get(&controller, &address, "did:test:a").await;
     restore(&controller, &address, previous).await;
 
     assert_eq!(name_of(&after), Some("new"));
+}
+
+/// A read that fetched the old profile and resumes after a local write must not put the old
+/// profile back: the next read sees the write.
+#[tokio::test(start_paused = true)]
+async fn a_read_in_flight_across_a_write_does_not_put_back_the_old_profile() {
+    let (controller, address, fake, previous) = agent_language().await;
+    fake.set("did:test:a", &profile("old"));
+    let release = fake.hold("did:test:a");
+    let reader = tokio::spawn({
+        let address = address.clone();
+        async move {
+            get(
+                &LanguageController::global_instance(),
+                &address,
+                "did:test:a",
+            )
+            .await
+        }
+    });
+    while fake.gets() == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    fake.set("did:test:a", &profile("new"));
+    controller
+        .expression_create(
+            &address,
+            json!({"did": "did:test:a"}),
+            &AgentContext::managed("did:test:a".to_string()),
+        )
+        .await
+        .expect("expression_create");
+    release.send(()).unwrap();
+    let in_flight = reader.await.unwrap();
+    let after = get(&controller, &address, "did:test:a").await;
+    let gets = fake.gets();
+    restore(&controller, &address, previous).await;
+
+    assert_eq!(name_of(&in_flight), Some("old"));
+    assert_eq!(name_of(&after), Some("new"));
+    assert_eq!(gets, 2);
+}
+
+/// The proof verdict depends on the time (a device key can expire) and on the identity module,
+/// so the cache keeps the expression as the language returned it, and every read, a hit too,
+/// carries a verdict made at that read.
+#[tokio::test(start_paused = true)]
+async fn the_cache_keeps_no_proof_verdict_and_every_read_carries_one() {
+    let (controller, address, fake, previous) = agent_language().await;
+    let signed = json!({
+        "author": "did:test:x",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "data": {"name": "A"},
+        "proof": {"key": "did:test:x#key", "signature": "00"},
+    });
+    fake.set("did:test:a", &signed.to_string());
+
+    let first = get(&controller, &address, "did:test:a").await;
+    let hit = get(&controller, &address, "did:test:a").await;
+    let stored = controller.agent_profiles.lock().unwrap().get(
+        &address,
+        "did:test:a",
+        tokio::time::Instant::now(),
+    );
+    let gets = fake.gets();
+    restore(&controller, &address, previous).await;
+
+    assert_eq!(gets, 1);
+    for read in [&first, &hit] {
+        assert_eq!(read.as_ref().unwrap()["proof"]["invalid"], json!(true));
+    }
+    let stored_proof = &stored.flatten().expect("cached")["proof"];
+    assert!(stored_proof.get("valid").is_none() && stored_proof.get("invalid").is_none());
 }
 
 #[tokio::test(start_paused = true)]
