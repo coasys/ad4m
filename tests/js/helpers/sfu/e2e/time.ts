@@ -1,5 +1,8 @@
 /** Waiting, for the e2e scenarios and their fault layer. */
 
+/** How often a readiness loop looks again when no event signals it: root AGENTS.md asks for 100 ms or less. */
+export const POLL_MS = 100;
+
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**

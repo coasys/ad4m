@@ -10,7 +10,7 @@
 import { CAMERA, toneFor } from "./media.js";
 import { Participant } from "./participant.js";
 import type { JoinOptions, Size, Snapshot } from "./protocol.js";
-import { sleep, within } from "./time.js";
+import { POLL_MS, sleep, within } from "./time.js";
 import type { World } from "./world.js";
 
 /**
@@ -31,9 +31,6 @@ export function all(...checks: Check[]): Check {
  * tone is what a receiver calls silence, so a shorter pause cannot explain it.
  */
 const PAUSE_MS = 250;
-
-/** How often `eventually` looks again: root AGENTS.md asks for 100 ms or less when no event signals readiness. */
-const POLL_MS = 100;
 
 export class Call {
   readonly participants: Participant[] = [];

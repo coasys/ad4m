@@ -36,7 +36,7 @@
 import { all, type Call } from "../e2e/call.js";
 import type { Participant } from "../e2e/participant.js";
 import type { Snapshot } from "../e2e/protocol.js";
-import { sleep, within } from "../e2e/time.js";
+import { POLL_MS, sleep, within } from "../e2e/time.js";
 import { GROWTH_MS, MAX_DEPARTURES, PROBE_MS, RUN_RECOVER_MS, SAMPLE_MS } from "./timing.js";
 import type { WsShaper } from "./wsproxy.js";
 
@@ -154,6 +154,7 @@ export class RunChecks {
     }
     const ended = this.windows.filter((w) => w.endAt !== null);
     const deadline = Math.max(0, ...ended.map((w) => w.endAt! + RUN_RECOVER_MS));
+    // Only the sampler adds evidence, once per SAMPLE_MS: looking again sooner finds the same samples.
     while (Date.now() < deadline && ended.some((w) => !this.recovery(w).recovered)) await sleep(SAMPLE_MS);
     await this.halt();
     this.samples.push(await this.take());
@@ -289,7 +290,7 @@ export async function reconnected(shaper: WsShaper, participant: Participant, be
         last = error instanceof Error ? error.message : String(error);
       }
     }
-    await sleep(250);
+    await sleep(POLL_MS);
   }
   throw new Error(`${participant.name}'s socket did not come back within ${boundMs}ms: ${last}`);
 }
