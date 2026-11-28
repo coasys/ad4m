@@ -161,7 +161,8 @@ export class Call {
       try {
         problems = check(await within(deadline - Date.now(), this.snapshots(), `${label}: snapshots`), false);
       } catch (error) {
-        problems = [error instanceof Error ? error.message : String(error)];
+        // Keep what the last snapshots showed: that, not the late snapshot, is why the check failed.
+        problems = [...problems, error instanceof Error ? error.message : String(error)];
         break;
       }
       const took = Date.now() - started;
@@ -172,6 +173,7 @@ export class Call {
       }
       if (Date.now() >= deadline) break;
       await sleep(Math.min(POLL_MS, deadline - Date.now()));
+      if (Date.now() >= deadline) break;
     }
     const shown = problems.slice(0, 12).join("; ") + (problems.length > 12 ? `; … ${problems.length - 12} more` : "");
     throw new Error(`${label}: not true within ${timeoutMs} ms — ${shown}`);

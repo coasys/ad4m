@@ -193,6 +193,11 @@ describe("SFU fault layer: Call.eventually keeps its bound", () => {
     expect(await slowCall(5).eventually(ok, 1_000, "in time")).to.be.below(1_000);
   });
 
+  it("a check still false at the bound fails with what the snapshots last showed", async () => {
+    const error = await slowCall(1).eventually(() => ["u1 sees u2 at 320x240, expected 640x480"], 250, "video").then(() => null, (e: Error) => e);
+    expect(error?.message).to.match(/^video: not true within 250 ms — u1 sees u2 at 320x240, expected 640x480/);
+  });
+
   it("now looks once, with no bound", async () => {
     await slowCall(20).now(ok, "once");
     const error = await slowCall(1).now(() => ["u1 hears nothing from u2"], "once").then(() => null, (e: Error) => e);
