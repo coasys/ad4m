@@ -1,6 +1,7 @@
 //! A test person's apps over JSON lines, for the agent language suites: the
 //! TypeScript language's tests and the Rust port's tests drive it to make real key-log events,
-//! offers, claims, signed requests and agent records with the identity core, then send them
+//! offers, claims, signed requests, agent records, sealed inbox messages, pre-join reads and
+//! sealed private records with the identity core, then send them
 //! through the language to a real store.
 //!
 //! ```text
@@ -23,6 +24,11 @@
 //! | `request` | `name`, `signer` (`master`, `d1` or a device label), `keyId?`, `store` (the store's `did:key`), `method`, `path`, `body`, `expires` | the `SignedRequest` |
 //! | `record` | `name`, `signer`, `agent` or `profile`, `version`, `author?`, `expressionSigner?`, `did?`, `anchor?` | a `did:scid` `AgentRecord` signed by `signer`, anchored at the person's head or at seq `anchor`. Its profile is `agent` as the person's AD4M expression signed by `signer` (or by `expressionSigner`, authored by `author` instead of the person), or `profile` stored as given. `did` replaces the person's (not re-signed: the signature does not cover the did): a hostile store's row |
 //! | `didKeyRecord` | `device`, `profile`, `version` | a `did:key` `AgentRecord` signed by that key |
+//! | `sealMaster` | `name`, `keyId` | the current master key sealed for the joined inbox of `keyId` |
+//! | `preAddress` | `device` | `{address, sign, r}` of the device string's pre-join inbox |
+//! | `ticket` | `name`, `device`, `offer`, `s` | the ticket of the bound `offer`, sealed for the device's pre-join inbox |
+//! | `preAuth` | `device`, `store` (the store's `did:key`), `method`, `path`, `expires` | a `PreInboxAuth` by the device |
+//! | `sealedRecord` | `name`, `version` | a `SealedRecord` wrapped to the readers of the person's log |
 
 #[path = "../tests/common/agent.rs"]
 mod agent;
@@ -222,6 +228,42 @@ impl Apps {
                 let version = number(req, "version")?;
                 let device = self.device(text(req, "device")?);
                 to_json(&did_key_record(&device.key, profile, version))
+            }
+            "sealMaster" => {
+                let key_id = text(req, "keyId")?.to_string();
+                Ok(Value::String(self.person(req)?.seal_master(&key_id)))
+            }
+            "preAddress" => {
+                let device = self.device(text(req, "device")?);
+                Ok(
+                    json!({ "address": device.pre_address(), "sign": device.sign_key(), "r": device.r() }),
+                )
+            }
+            "ticket" => {
+                let offer: SignedOffer = parse(req, "offer")?;
+                let s: [u8; 32] = bs58::decode(text(req, "s")?)
+                    .into_vec()
+                    .map_err(|e| e.to_string())?
+                    .try_into()
+                    .map_err(|_| "s is 32 bytes".to_string())?;
+                let label = text(req, "device")?.to_string();
+                let device = Device::new(&label);
+                Ok(Value::String(
+                    self.person(req)?.seal_ticket(&device, &offer, s),
+                ))
+            }
+            "preAuth" => {
+                let device = self.device(text(req, "device")?);
+                to_json(&device.pre_auth_value(
+                    text(req, "store")?,
+                    text(req, "method")?,
+                    text(req, "path")?,
+                    number(req, "expires")?,
+                ))
+            }
+            "sealedRecord" => {
+                let version = number(req, "version")?;
+                to_json(&self.person(req)?.sealed_record(version, None))
             }
             other => Err(format!("unknown op {other}")),
         }

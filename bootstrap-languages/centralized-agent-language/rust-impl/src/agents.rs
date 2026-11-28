@@ -35,7 +35,7 @@ use ad4m_ldk::identity::{AgentRecord, AgentRecordProof, IdentityErrorCode};
 use ad4m_ldk::prelude::{Expression, LanguageError, LanguageResult};
 use serde_json::Value;
 
-use crate::store::{segment, Http, Store};
+use crate::store::{segment, Http, Send, Store};
 
 /// The running agent, as the host gives it.
 pub trait AgentKey {
@@ -193,7 +193,7 @@ pub async fn get<H: Http>(
     now_s: u64,
 ) -> LanguageResult<Option<Expression>> {
     let record: Option<AgentRecord> = store
-        .read(&format!("/v1/agents/{}", segment(did)), Vec::new())
+        .read(&format!("/v1/agents/{}", segment(did)), Send::default())
         .await?;
     let Some(record) = record.filter(|r| r.did == did) else {
         return Ok(None);

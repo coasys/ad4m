@@ -2,7 +2,8 @@
 //!
 //! A request names the store it is for: `store` is this store key's `did:key`, as a signed head
 //! names its store (`403 store` otherwise), so a request for one store cannot be replayed to
-//! another that holds the same log. A client knows the key from its configuration (the
+//! another that holds the same log. A pre-join inbox read (`X-Coasys-Inbox`) names it the same
+//! way and passes the same check. A client knows the key from its configuration (the
 //! executor's `identity.storeKeys`, the `store-key` line `serve` prints); the `store` of a
 //! signed head checked against those keys names it too.
 //!
@@ -64,14 +65,48 @@ fn refuse(detail: impl Into<String>) -> ApiError {
     ApiError::forbidden("signer", detail)
 }
 
+/// Records `nonce` (16 bytes, base58btc) as seen at `now`: `403 signer` when it was seen in
+/// the last [`NONCE_WINDOW_S`]. Signed requests and pre-join inbox reads share the store. Runs
+/// on `conn` as given: a caller that checks more in the same write passes its transaction, and
+/// a refusal rolls the nonce back with it.
+pub(crate) fn take_nonce(conn: &Connection, nonce: &str, now: u64) -> Result<(), ApiError> {
+    // 16 bytes take at most 22 base58 characters; longer text is refused before decoding.
+    let nonce_ok = nonce.len() <= 22 && bs58::decode(nonce).into_vec().is_ok_and(|b| b.len() == 16);
+    if !nonce_ok {
+        return Err(ApiError::invalid(
+            "request",
+            "the nonce is 16 bytes of base58btc",
+        ));
+    }
+    conn.execute(
+        "DELETE FROM nonces WHERE seen_at <= ?1",
+        params![to_sql(now.saturating_sub(NONCE_WINDOW_S))?],
+    )?;
+    let fresh = conn.execute(
+        "INSERT OR IGNORE INTO nonces (nonce, seen_at) VALUES (?1, ?2)",
+        params![nonce, to_sql(now)?],
+    )?;
+    if fresh == 0 {
+        return Err(refuse("the nonce was seen in the last 10 minutes"));
+    }
+    Ok(())
+}
+
 /// Decodes the header. Padded and unpadded base64url are both taken.
 pub fn decode_header(header: &str) -> Result<SignedRequest, ApiError> {
+    decode_json_header(header, "X-Coasys-Request")
+}
+
+/// Decodes a header that carries base64url(JSON), padded or not (`400 request` otherwise).
+pub(crate) fn decode_json_header<T: serde::de::DeserializeOwned>(
+    header: &str,
+    name: &str,
+) -> Result<T, ApiError> {
     let trimmed = header.trim().trim_end_matches('=');
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(trimmed)
-        .map_err(|_| ApiError::invalid("request", "X-Coasys-Request is not base64url"))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| ApiError::invalid("request", format!("X-Coasys-Request: {e}")))
+        .map_err(|_| ApiError::invalid("request", format!("{name} is not base64url")))?;
+    serde_json::from_slice(&bytes).map_err(|e| ApiError::invalid("request", format!("{name}: {e}")))
 }
 
 /// Encodes a signed request for the header.
@@ -105,6 +140,18 @@ pub fn percent_decode(path: &str) -> Option<String> {
 }
 
 impl Store {
+    /// Checks that a signed request or a pre-join inbox read names this store (`403 store`
+    /// otherwise), so it cannot be replayed to another store.
+    pub(crate) fn check_store(&self, store: &str) -> Result<(), ApiError> {
+        if store != self.key.did() {
+            return Err(ApiError::forbidden(
+                "store",
+                "the request is signed for another store",
+            ));
+        }
+        Ok(())
+    }
+
     /// Checks a signed request for the identity `did` (when the route names one) and records
     /// its nonce, in a transaction of its own.
     pub fn verify_request(
@@ -137,12 +184,7 @@ impl Store {
         let signed = decode_header(header)?;
         let req = &signed.req;
         let now = self.now();
-        if req.store != self.key.did() {
-            return Err(ApiError::forbidden(
-                "store",
-                "the request is signed for another store",
-            ));
-        }
+        self.check_store(&req.store)?;
         if let Some(did) = did {
             if req.did != did {
                 return Err(refuse("the request is signed for another identity"));
@@ -232,27 +274,7 @@ impl Store {
         if signer == Signer::Master && state.current_master().map(|m| &m.id) != Some(&req.key_id) {
             return Err(refuse("the route needs the current master key"));
         }
-        let nonce_ok = bs58::decode(&req.nonce)
-            .into_vec()
-            .map(|b| b.len() == 16)
-            .unwrap_or(false);
-        if !nonce_ok {
-            return Err(ApiError::invalid(
-                "request",
-                "the nonce is 16 bytes of base58btc",
-            ));
-        }
-        conn.execute(
-            "DELETE FROM nonces WHERE seen_at <= ?1",
-            params![to_sql(now.saturating_sub(NONCE_WINDOW_S))?],
-        )?;
-        let fresh = conn.execute(
-            "INSERT OR IGNORE INTO nonces (nonce, seen_at) VALUES (?1, ?2)",
-            params![req.nonce, to_sql(now)?],
-        )?;
-        if fresh == 0 {
-            return Err(refuse("the nonce was seen in the last 10 minutes"));
-        }
+        take_nonce(conn, &req.nonce, now)?;
         Ok(Verified {
             scid: scid.to_string(),
             key_id: req.key_id.clone(),

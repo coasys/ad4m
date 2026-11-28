@@ -41,6 +41,18 @@ fn request() -> SignedRequest {
     }
 }
 
+/// The store's receipt for a record write of `version`.
+fn receipt(version: u64) -> RecordReceipt {
+    RecordReceipt {
+        scid: "zScid".into(),
+        version,
+        envelope: "QmEnvelope".into(),
+        seq: 4,
+        store: "did:key:zStore".into(),
+        sig: "zReceiptSig".into(),
+    }
+}
+
 fn signed_offer() -> SignedOffer {
     SignedOffer {
         offer: Offer {
@@ -232,6 +244,120 @@ impl IdentityCapability for Agent {
             seq: Some(2),
         })
     }
+    async fn identity_inbox_put(
+        &mut self,
+        address: InboxAddress,
+        write: InboxWrite,
+        _req: SignedRequest,
+    ) -> LanguageResult<InboxStored> {
+        if matches!(address, InboxAddress::Pre { .. }) && write.bind.is_none() {
+            return Err(IdentityErrorCode::Forbidden {
+                reason: ForbiddenReason::Writer,
+            }
+            .into());
+        }
+        Ok(InboxStored {
+            id: "zMsg".into(),
+            expires: 1_700_000_300,
+        })
+    }
+    async fn identity_inbox_list(
+        &mut self,
+        _address: InboxAddress,
+        auth: InboxAuth,
+        wait_s: u8,
+    ) -> LanguageResult<Vec<InboxMessage>> {
+        self.calls.push(format!(
+            "inbox {} {wait_s}",
+            match auth {
+                InboxAuth::Request(_) => "request",
+                InboxAuth::Pre(_) => "pre",
+            }
+        ));
+        Ok(vec![message()])
+    }
+    async fn identity_inbox_ack(
+        &mut self,
+        _address: InboxAddress,
+        id: String,
+        _auth: InboxAuth,
+    ) -> LanguageResult<()> {
+        if id != "zMsg" {
+            return Err(IdentityErrorCode::NotFound.into());
+        }
+        Ok(())
+    }
+    async fn identity_get_record(
+        &mut self,
+        _did: String,
+        _req: SignedRequest,
+    ) -> LanguageResult<Option<StoredRecord>> {
+        Ok(None)
+    }
+    async fn identity_put_record(
+        &mut self,
+        _did: String,
+        record: SealedRecord,
+        _req: SignedRequest,
+    ) -> LanguageResult<RecordStored> {
+        Ok(RecordStored {
+            version: record.version,
+            receipt: receipt(record.version),
+        })
+    }
+    async fn identity_post_request(
+        &mut self,
+        _did: String,
+        _post: PostedRequest,
+        _req: SignedRequest,
+    ) -> LanguageResult<RequestPosted> {
+        Ok(RequestPosted { id: "zReq".into() })
+    }
+    async fn identity_list_requests(
+        &mut self,
+        _did: String,
+        since: u64,
+        _req: SignedRequest,
+    ) -> LanguageResult<Vec<DeviceRequest>> {
+        self.calls.push(format!("requests {since}"));
+        Ok(Vec::new())
+    }
+    async fn identity_delete_request(
+        &mut self,
+        _did: String,
+        id: String,
+        _req: SignedRequest,
+    ) -> LanguageResult<()> {
+        self.calls.push(format!("delete {id}"));
+        Ok(())
+    }
+}
+
+fn message() -> InboxMessage {
+    InboxMessage {
+        id: "zMsg".into(),
+        sealed: "AAAA".into(),
+        writer: InboxWriter::Master {
+            scid: "zScid".into(),
+            key_id: "m1".into(),
+        },
+        stored_at: 1_700_000_000,
+        expires: 1_702_592_000,
+    }
+}
+
+fn pre_auth() -> PreInboxAuth {
+    PreInboxAuth {
+        address: "zPre".into(),
+        sign: "z6MkDev".into(),
+        r: "zR".into(),
+        store: "did:key:z6MkStore".into(),
+        method: "GET".into(),
+        path: "/v1/inbox/pre/zPre".into(),
+        nonce: "zNonce".into(),
+        expires: 1_700_000_060,
+        sig: "zSig".into(),
+    }
 }
 
 impl TokenCapability for Agent {
@@ -391,6 +517,208 @@ fn identity_offer_and_claim_calls() {
             .unwrap()
             .seq,
         Some(2)
+    );
+}
+
+#[test]
+fn identity_inbox_record_and_request_calls() {
+    let mut lang = block_on(Agent::init()).unwrap();
+    let did = || "did:scid:zScid".to_string();
+    let pre = InboxAddress::Pre { pre: "zPre".into() };
+    let joined = InboxAddress::Joined {
+        scid: "zScid".into(),
+        key_id: "d2".into(),
+    };
+    let write = InboxWrite {
+        sealed: "AAAA".into(),
+        bind: None,
+    };
+    assert_eq!(
+        block_on(lang.identity_inbox_put(joined.clone(), write.clone(), request()))
+            .unwrap()
+            .id,
+        "zMsg"
+    );
+    let err = block_on(lang.identity_inbox_put(pre.clone(), write, request())).unwrap_err();
+    assert_eq!(
+        IdentityErrorCode::from_language_error(&err),
+        Some(IdentityErrorCode::Forbidden {
+            reason: ForbiddenReason::Writer
+        })
+    );
+    assert_eq!(
+        block_on(lang.identity_inbox_list(joined.clone(), InboxAuth::Request(request()), 8))
+            .unwrap(),
+        vec![message()]
+    );
+    block_on(lang.identity_inbox_list(pre.clone(), InboxAuth::Pre(pre_auth()), 0)).unwrap();
+    block_on(lang.identity_inbox_ack(pre, "zMsg".into(), InboxAuth::Pre(pre_auth()))).unwrap();
+    let err =
+        block_on(lang.identity_inbox_ack(joined, "zOther".into(), InboxAuth::Request(request())))
+            .unwrap_err();
+    assert_eq!(
+        IdentityErrorCode::from_language_error(&err),
+        Some(IdentityErrorCode::NotFound)
+    );
+    assert_eq!(
+        block_on(lang.identity_get_record(did(), request())).unwrap(),
+        None
+    );
+    let record = SealedRecord {
+        version: 3,
+        wrapped: [("d1".to_string(), "AAAA".to_string())]
+            .into_iter()
+            .collect(),
+        recovery_key: None,
+        recovery_attestation: None,
+        nonce: "zNonce".into(),
+        ciphertext: "BBBB".into(),
+        signer: "d1".into(),
+        sig: "zSig".into(),
+    };
+    assert_eq!(
+        block_on(lang.identity_put_record(did(), record, request())).unwrap(),
+        RecordStored {
+            version: 3,
+            receipt: receipt(3)
+        }
+    );
+    let post = PostedRequest {
+        body: DeviceRequestBody::SendMaster {},
+        expires: 1_700_600_000,
+    };
+    assert_eq!(
+        block_on(lang.identity_post_request(did(), post, request()))
+            .unwrap()
+            .id,
+        "zReq"
+    );
+    block_on(lang.identity_list_requests(did(), 7, request())).unwrap();
+    block_on(lang.identity_delete_request(did(), "zReq".into(), request())).unwrap();
+    assert_eq!(
+        lang.calls,
+        vec![
+            "inbox request 8",
+            "inbox pre 0",
+            "requests 7",
+            "delete zReq"
+        ]
+    );
+}
+
+#[test]
+fn inbox_record_and_request_wire_types_use_the_stores_field_names() {
+    wire(
+        &InboxAddress::Pre { pre: "zPre".into() },
+        json!({"pre": "zPre"}),
+    );
+    wire(
+        &InboxAddress::Joined {
+            scid: "zScid".into(),
+            key_id: "d2".into(),
+        },
+        json!({"scid": "zScid", "keyId": "d2"}),
+    );
+    wire(
+        &InboxWrite {
+            sealed: "AAAA".into(),
+            bind: Some(InboxBind {
+                scid: "zScid".into(),
+                offer_id: "zOffer".into(),
+                sign: "z6MkDev".into(),
+                r: "zR".into(),
+            }),
+        },
+        json!({"sealed": "AAAA", "bind": {"scid": "zScid", "offerId": "zOffer", "sign": "z6MkDev", "r": "zR"}}),
+    );
+    wire(
+        &InboxWrite {
+            sealed: "AAAA".into(),
+            bind: None,
+        },
+        json!({"sealed": "AAAA"}),
+    );
+    wire(
+        &message(),
+        json!({"id": "zMsg", "sealed": "AAAA", "writer": {"kind": "master", "scid": "zScid", "keyId": "m1"},
+               "storedAt": 1_700_000_000u64, "expires": 1_702_592_000u64}),
+    );
+    wire(
+        &InboxWriter::Offer {
+            scid: "zScid".into(),
+            offer_id: "zOffer".into(),
+        },
+        json!({"kind": "offer", "scid": "zScid", "offerId": "zOffer"}),
+    );
+    wire(
+        &InboxAuth::Pre(pre_auth()),
+        json!({"address": "zPre", "sign": "z6MkDev", "r": "zR", "store": "did:key:z6MkStore", "method": "GET",
+               "path": "/v1/inbox/pre/zPre", "nonce": "zNonce", "expires": 1_700_000_060u64, "sig": "zSig"}),
+    );
+    let req = serde_json::to_value(request()).unwrap();
+    wire(&InboxAuth::Request(request()), req);
+    wire(
+        &SealedRecord {
+            version: 2,
+            wrapped: [("d1".to_string(), "AAAA".to_string())]
+                .into_iter()
+                .collect(),
+            recovery_key: Some("z6LSRec".into()),
+            recovery_attestation: Some(RecoveryAttestation {
+                key_id: "m0".into(),
+                sig: "zAtt".into(),
+            }),
+            nonce: "zNonce".into(),
+            ciphertext: "BBBB".into(),
+            signer: "d1".into(),
+            sig: "zSig".into(),
+        },
+        json!({"version": 2, "wrapped": {"d1": "AAAA"}, "recoveryKey": "z6LSRec", "recoveryAttestation": {"keyId": "m0", "sig": "zAtt"},
+               "nonce": "zNonce", "ciphertext": "BBBB", "signer": "d1", "sig": "zSig"}),
+    );
+    let receipt_json = json!({"scid": "zScid", "version": 2, "envelope": "QmEnvelope", "seq": 4,
+                              "store": "did:key:zStore", "sig": "zReceiptSig"});
+    wire(&receipt(2), receipt_json.clone());
+    wire(
+        &RecordStored {
+            version: 2,
+            receipt: receipt(2),
+        },
+        json!({"version": 2, "receipt": receipt_json}),
+    );
+    wire(
+        &StoredRecord {
+            record: SealedRecord {
+                version: 2,
+                wrapped: [("d1".to_string(), "AAAA".to_string())]
+                    .into_iter()
+                    .collect(),
+                recovery_key: None,
+                recovery_attestation: None,
+                nonce: "zNonce".into(),
+                ciphertext: "BBBB".into(),
+                signer: "d1".into(),
+                sig: "zSig".into(),
+            },
+            receipt: receipt(2),
+        },
+        json!({"record": {"version": 2, "wrapped": {"d1": "AAAA"}, "nonce": "zNonce", "ciphertext": "BBBB",
+                          "signer": "d1", "sig": "zSig"},
+               "receipt": receipt_json}),
+    );
+    wire(
+        &PostedRequest {
+            body: DeviceRequestBody::ConfirmRevoke {
+                key_ids: vec!["d2".into()],
+                rotate: true,
+            },
+            expires: 5,
+        },
+        json!({"body": {"kind": "confirm-revoke", "keyIds": ["d2"], "rotate": true}, "expires": 5}),
+    );
+    wire(
+        &DeviceRequestBody::SendMaster {},
+        json!({"kind": "send-master"}),
     );
 }
 
