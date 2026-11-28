@@ -17,10 +17,10 @@
 //!   because that requires a `RequestContext<RoleServer>` whose `Peer` has a
 //!   `pub(crate)` constructor — impossible to fabricate from outside rmcp.
 //!
-//! ## Why dispatch is duplicated (design v3 §6 caveat)
+//! ## Why dispatch is duplicated
 //!
-//! Design v3 §6 says "reuse MCP `#[tool]` macros as the single source of
-//! truth." Tool metadata IS reused verbatim via `tool_router.list_all()` —
+//! The MCP `#[tool]` macros stay the single source of truth for tools.
+//! Tool metadata IS reused verbatim via `tool_router.list_all()` —
 //! descriptions, JSON schemas, names all flow from the same `#[tool(...)]`
 //! attributes the MCP transport reads. Only the DISPATCH is duplicated,
 //! because rmcp's router entrypoint requires a `Peer` we cannot construct.

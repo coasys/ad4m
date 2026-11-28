@@ -5,8 +5,7 @@
 //! unchanged; this module is purely additive so existing clients keep
 //! working.
 //!
-//! Surface covered (matches the proposal under
-//! `~/workspaces/coasys/.specs/PROPOSAL_AI_OPENAI_COMPATIBLE_ENDPOINT.md`):
+//! Surface covered:
 //!
 //! * `GET  /v1/models`               — registered models, across their endpoints
 //! * `POST /v1/chat/completions`     — stateless chat, with optional SSE streaming

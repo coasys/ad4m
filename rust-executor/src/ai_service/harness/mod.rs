@@ -1,8 +1,6 @@
 //! Interpretation-pass LLM harness — the loop that lets the model reason
 //! against tools while writing an extraction.
 //!
-//! Design: [[planning/llm-harness-design-2026-08-21-v3.md]] §6 + v2 §2.
-//!
 //! ## Shape
 //!
 //! ```text
@@ -502,8 +500,8 @@ pub trait CompletionSource: Send + Sync {
     }
 }
 
-/// Configuration knob wired to `AutoProcessorConfig.max_tool_calls` (v3 §6
-/// default 20). The cap prevents a stuck / adversarial LLM from making
+/// Configuration knob wired to `AutoProcessorConfig.max_tool_calls`
+/// (default 20). The cap prevents a stuck / adversarial LLM from making
 /// unbounded tool calls and DOS'ing the extraction pass.
 ///
 /// When the cap is hit, the harness appends a final system message asking
@@ -580,8 +578,8 @@ impl std::error::Error for CreditRefused {}
 /// `initial_messages` is the caller-built prompt — for interpretation, this
 /// is the extraction system prompt + few-shots + transcript-as-user-message.
 /// The harness does NOT prepend any tool-use guidance here; that lives in
-/// the caller's system prompt (design v2 §Q6: "the harness passes tools
-/// verbatim; per-task guidance lives in the caller").
+/// the caller's system prompt: the harness passes tools verbatim, and
+/// per-task guidance lives in the caller.
 ///
 /// `observer` is told about every tool call as the loop makes it
 /// ([`ToolObserver`]). Interpretation passes its emit context when an

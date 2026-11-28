@@ -9,10 +9,9 @@
 //! `ai_service → openai_compat` cycle: `openai_compat` already depends on
 //! `ai_service`, so ownership flows one way only.
 //!
-//! Design: [[planning/llm-harness-design-2026-08-21-v3.md]] §6 — "reuse the
-//! `/v1` tool-calling wire code (system-prompt injection + grammar-
-//! constrained decoding + text-side extraction) so local AND remote models
-//! see tools through one uniform path."
+//! It reuses the `/v1` tool-calling wire code (system-prompt injection +
+//! grammar-constrained decoding + text-side extraction), so local AND remote
+//! models see tools through one uniform path.
 
 use super::tool_grammar;
 use super::types::{FunctionDef, ToolDef};

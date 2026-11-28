@@ -1,6 +1,5 @@
 //! `ToolProvider` — the shared seam between MCP and the interpretation-pass
-//! LLM harness. Design: [[planning/llm-harness-design-2026-08-21-v3.md]] §6
-//! + v2 §Q4.
+//! LLM harness.
 //!
 //! Both the `rmcp` transport and the harness loop consume the same tool
 //! metadata + dispatch through this trait. No duplication: if Josh adds a
@@ -137,7 +136,7 @@ impl ToolSchema {
 /// Dynamic per-class tools (generated from currently-registered SHACL
 /// classes) are recomputed on each `tools()` call by design — that keeps the
 /// tool surface in sync with the perspective's current shape without any
-/// invalidation bookkeeping (design v2 §3: "not doing tool caching").
+/// invalidation bookkeeping (no tool caching).
 ///
 /// `call()` returns a plain `String` result. The harness slots it in as the
 /// content of the next `role: "tool"` message; the MCP transport wraps it
@@ -157,8 +156,8 @@ pub trait ToolProvider: Send + Sync {
 }
 
 /// Filter that narrows one provider's surface to a caller-defined subset.
-/// Enables the per-flow-step allowlist (v3 §1) + the interpretation-pass
-/// read-only cut (v2 §Q5) without touching the underlying provider.
+/// Enables the per-flow-step allowlist and the interpretation-pass
+/// read-only cut without touching the underlying provider.
 ///
 /// Kept generic (predicate on `&ToolSchema`) rather than a hard-coded
 /// allowlist so callers can filter by name prefix, by description content,
@@ -297,7 +296,7 @@ fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap
     }
 }
 
-/// The interpretation-pass read-only cut (v2 §Q5) — the harness wraps
+/// The interpretation-pass read-only cut — the harness wraps
 /// `Ad4mToolProvider` in `FilteredProvider::new(_, is_read_only)` before
 /// handing it to a pass.
 ///
