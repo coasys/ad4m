@@ -571,8 +571,11 @@ waits off the queue, so the restart
 offer it triggers is answered while the reply is still out.
 The one timer in the call layer's recovery is the receive-stall watchdog
 (RTP statistics raise no event, so it polls them once a second): a
-connected call that sends media but has received none, and no sender
-report, for 5 s restarts ICE; a stall again after that restart rebuilds
+connected call that sends media but has received no RTP for 5 s, and no
+receiver report (`remote-inbound-rtp`, the SFU's report on this client's own
+media) for more than two report intervals (video 1 s, audio 5 s: so more than
+10 s with audio only), restarts ICE; both windows start again when this client's
+media turns back on after a silence. A stall again after that restart rebuilds
 the call, counted in the rebuild budget. A call that sends nothing is never
 judged. The rejoin back-off of a rebuild stays a timer too: no event says
 the executor can take a join. Mesh calls keep their own media check
@@ -580,8 +583,10 @@ the executor can take a join. Mesh calls keep their own media check
 restarts, never another device of the agent), and a manager with no session
 (join not back, left, replaced) sends none. A room roster that leaves this
 session out asks `sfu.callResume` and rebuilds the call when its
-reply says the session is not listed — an ask the socket fails is asked
-again by the next roster that still omits it; a roster that
+reply says the session is not listed. An ask that times out (408) on an open
+socket is asked once more, and a second timeout rebuilds the call (a departed
+session gets no more rosters, so no event may come); an ask the closed socket
+fails (503) waits for the reconnect. A roster that
 lists it, as during a restart in place, changes nothing.
 `ApiClient` drops an executor socket whose ping stays unanswered for a ping
 interval (10 s, `PING_INTERVAL_MS`; longer while a large write it sent may

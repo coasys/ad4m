@@ -390,6 +390,11 @@ export class SfuManager {
     private resumeInFlight: RTCPeerConnection | null = null
     /** A trigger while `resumeInFlight`'s ask was out wants one more ask once it ends. */
     private resumeAgain = false
+    /** Timed-out (408) asks in a row for a session the roster left out. One retry: each ask
+     *  already waited out the RPC timeout, so a second timeout is a decision, not a blip,
+     *  and a third wait would only lengthen a dead call. */
+    private resumeTimeouts = 0
+    private static readonly MAX_RESUME_RETRIES = 1
     /** The last answer this connection produced for a server offer. The
      *  executor's pending offer is the one source of what is still owed:
      *  a socket fault on the send keeps nothing more, since the executor
@@ -893,6 +898,7 @@ export class SfuManager {
         if (!participantId) return
         if (sessions.some((s) => s.participantId === participantId)) {
             this.listedAtRevision = revision
+            this.resumeTimeouts = 0
             return
         }
         this.resume(pc)
@@ -919,10 +925,16 @@ export class SfuManager {
      *    client holds a received track of;
      *  - inbound RTP over all media sections has not grown for 5 s, while
      *    this client sends now (outbound RTP grew since the read before);
-     *  - and the RTCP reports on this client's own media have stopped: more
-     *    than two report intervals with none, the interval being the
-     *    shortest for what this client sends now (str0m: video 1 s, audio
-     *    5 s). One lost report is not a dead path.
+     *  - and the receiver reports on this client's own media (the stats'
+     *    `remote-inbound-rtp`, which the SFU sends about what it receives
+     *    from this client) have not changed for more than MISSED_REPORTS (2)
+     *    report intervals, the interval being 1 s if this client sends
+     *    video now, else 5 s (str0m). That is a little over 5 s with video
+     *    (the RTP window decides) and more than 10 s with audio only. One
+     *    lost report is not a dead path.
+     *  - Both windows count from the moment this client's outbound starts
+     *    growing again after not growing, so media turned back on after a
+     *    silence gets a full interval before the SFU owes a report.
      *
      * The reports are how "nobody sends" is told apart from "nothing reaches
      * me". A muted track still sends silence or black frames, so RTP keeps
@@ -948,6 +960,8 @@ export class SfuManager {
         let rtp: { at: number; inbound: number } | null = null
         let reports: { at: number; key: string } | null = null
         let last: ReceiveSample | null = null
+        // Whether the last read saw outbound packets grow.
+        let sending = false
         let sampling = false
         const watch = setInterval(async () => {
             // A connection that is no longer the call's, or closed, is watched no more.
@@ -995,7 +1009,17 @@ export class SfuManager {
             }
             // What this client sends now, against the read before: not since inbound
             // last moved, or a camera turned off in an idle room keeps the video window.
-            if (!previous || sample.outbound <= previous.outbound) return
+            if (!previous || sample.outbound <= previous.outbound) {
+                sending = false
+                return
+            }
+            // Sending starts again after an idle stretch (replaceTrack(null)): the windows
+            // aged through it, but the SFU owes a report only from now on.
+            if (!sending) {
+                sending = true
+                rtp = { at: now, inbound: sample.inbound }
+                reports = { at: now, key: sample.reports }
+            }
             const reportMs =
                 sample.outboundVideo > previous.outboundVideo ? SfuManager.VIDEO_REPORT_MS : SfuManager.AUDIO_REPORT_MS
             if (now - rtp.at < SfuManager.RECEIVE_STALL_MS || now - reports.at <= SfuManager.MISSED_REPORTS * reportMs) return
@@ -1107,6 +1131,7 @@ export class SfuManager {
         // it: its late reply applies nothing and runs nothing here.
         this.resumeInFlight = null
         this.resumeAgain = false
+        this.resumeTimeouts = 0
         this.renegotiationUnsubscribe = this.neighbourhood.subscribeSfuCallRenegotiationOffer(
             this.agentDid,
             (event) => {
@@ -1271,14 +1296,16 @@ export class SfuManager {
      * ask listed it again meanwhile. The reply names the connection and
      * session it was asked for: one that lands after either changed applies
      * nothing. The ask has no timer of its own: the socket layer fails a
-     * request on a closed socket (503) or one that gets no reply (408), and
-     * either keeps the call and waits for the next trigger.
+     * request on a closed socket (503) or one that gets no reply (408). A 503
+     * keeps the call: the socket's reconnect asks again. A 408 on a session
+     * the roster left out is asked once more (MAX_RESUME_RETRIES), then the
+     * call is rebuilt: the socket is open, so no reconnect has to come. Any
+     * other 408 keeps the call and waits for the next trigger.
      * One ask per connection at a time: while `pc`'s is out a trigger only
      * marks `resumeAgain`, and `resumeDone` — once the reply is applied —
      * sends the one follow-up the marks add up to, while `pc` is still this
      * call's.
-     * A socket fault (503, 408) keeps the call: the next socket reconnect
-     * asks again. A 403 ends it: the executor refused this session's resume —
+     * A 403 ends it: the executor refused this session's resume —
      * it is another agent's, or this agent lost its membership — and a
      * refusal does not heal.
      */
@@ -1348,6 +1375,20 @@ export class SfuManager {
         if ("error" in reply) {
             const err = reply.error
             if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+            // A 408 raises on a socket that stays open, and a departed session gets no
+            // further rosters: for an omission nothing else is guaranteed to come, so it
+            // gets one more ask and then a rebuild (a rebuild is one of `rebuilds`).
+            if (err instanceof RpcError && err.status === 408 && this.listedAtRevision < this.rosterRevision) {
+                if (this.resumeTimeouts < SfuManager.MAX_RESUME_RETRIES) {
+                    this.resumeTimeouts++
+                    console.warn("SFU: the resume for an unlisted session timed out, asking again:", err)
+                    this.resumeAgain = true
+                    return
+                }
+                console.warn("SFU: the resume for an unlisted session timed out again, rebuilding the call:", err)
+                void this.reconnect()
+                return
+            }
             if (isSocketFault(err)) {
                 console.warn("SFU: resuming the session failed with the socket; the next reconnect asks again:", err)
                 return
@@ -1370,6 +1411,7 @@ export class SfuManager {
         }
         const result = reply.result
         if (this.state.peerConnection !== pc || this.state.participantId !== participantId) return
+        this.resumeTimeouts = 0
         if (!result.listed) {
             // Only a roster applied since the request went out, and listing
             // this session, cancels the rebuild: the last one it knows of may

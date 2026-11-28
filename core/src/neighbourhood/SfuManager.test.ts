@@ -3439,10 +3439,30 @@ test("a resume the socket fails (503) changes nothing: the next reconnect asks a
     await manager.leave()
 })
 
-test("an unlisted-session ask the socket faults keeps the call and sets no retry timer; the next trigger asks again", async () => {
-    // The reply never arrived (408): nothing resolved the omission. The socket
-    // layer already judged the socket, so the call layer keeps the call and
-    // waits for the next event: another roster, or the socket's reconnect.
+test("an unlisted-session ask that times out (408) on an open socket asks once more, then rebuilds the call; no event is needed", async () => {
+    // A 408 raises on a socket that stays open, and a departed session gets no
+    // further rosters: nothing else is guaranteed to come. The omission ends
+    // in a decision by itself: one more ask, then a rebuild.
+    fakeTimers()
+    try {
+        const api = fakeApi()
+        api.sfuCallResume.mockRejectedValue(new RpcError(408, "request timed out"))
+        const manager = new SfuManager(api, ROOM, ME, URL)
+        await manager.join(fakeStream())
+
+        api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
+        await jest.advanceTimersByTimeAsync(1_000)
+
+        expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
+        expect(api.sfuCallLeave).toHaveBeenCalledTimes(1)
+        expect(api.sfuCallJoin).toHaveBeenCalledTimes(2)
+        await manager.leave()
+    } finally {
+        jest.useRealTimers()
+    }
+})
+
+test("an unlisted-session ask that times out once and then answers listed keeps the call", async () => {
     fakeTimers()
     try {
         const api = fakeApi()
@@ -3451,25 +3471,28 @@ test("an unlisted-session ask the socket faults keeps the call and sets no retry
         await manager.join(fakeStream())
 
         api.emitRoster(roster([ALICE], {}, { withoutMe: true }))
-        await flush()
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+        await jest.advanceTimersByTimeAsync(1_000)
 
-        await jest.advanceTimersByTimeAsync(60_000)
-        await flush()
-        expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
-        expect(api.sfuCallLeave).not.toHaveBeenCalled()
-
-        api.emitReconnect()
-        await flush()
-        await flush()
         expect(api.sfuCallResume).toHaveBeenCalledTimes(2)
         expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
         await manager.leave()
     } finally {
         jest.useRealTimers()
     }
+})
+
+test("a resume that times out after the socket's return (the session was not found unlisted) keeps the call for the next trigger", async () => {
+    const api = fakeApi()
+    api.sfuCallResume.mockRejectedValueOnce(new RpcError(408, "request timed out"))
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+
+    api.emitReconnect()
+    await flush()
+    await flush()
+    expect(api.sfuCallResume).toHaveBeenCalledTimes(1)
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
+    await manager.leave()
 })
 
 test("a resume refused with 403 ends the call, not a rebuild: the session is another agent's", async () => {
@@ -3900,6 +3923,34 @@ describe("the receive-stall watchdog", () => {
         await jest.advanceTimersByTimeAsync(60_000)
         expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
         expect(api.sfuCallLeave).not.toHaveBeenCalled()
+    })
+
+    test("audio unmuted after a silence of both sides gets a full report interval before a restart", async () => {
+        const { api, pc } = await flowingCall()
+        // Both sides muted (replaceTrack(null)) well past every window.
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(20_000)
+
+        // One side unmutes; the SFU owes no report yet.
+        pc.flow = { inbound: false, outbound: true, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(8_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(6_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
+    })
+
+    test("video unmuted after a silence of both sides gets its windows from the unmute, not from before", async () => {
+        const { api, pc } = await flowingCall()
+        pc.flow = { inbound: false, outbound: false, video: false, feedback: false }
+        await jest.advanceTimersByTimeAsync(20_000)
+
+        pc.flow = { inbound: false, outbound: true, video: true, feedback: false }
+        await jest.advanceTimersByTimeAsync(3_000)
+        expect(api.sfuCallRestartIce).not.toHaveBeenCalled()
+
+        await jest.advanceTimersByTimeAsync(5_000)
+        expect(api.sfuCallRestartIce).toHaveBeenCalledTimes(1)
     })
 
     test("a room where nobody else sends is left alone", async () => {
