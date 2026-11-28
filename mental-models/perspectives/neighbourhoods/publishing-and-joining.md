@@ -13,7 +13,7 @@ Publish (`neighbourhood.publish(perspectiveUuid, linkLanguage, meta)`):
 1. `LanguageController::install_language(linkLanguage)`. The client normally creates a unique link language from a template first ([Language trust and templates](../../languages/runtime/installing/trust-and-templates.md)).
 2. `create_neighbourhood_with_context` stores `Neighbourhood { link_language, meta }`, signed as the caller's agent.
 3. Set `shared_url`, `neighbourhood`, state `NeighbourhoodCreationInitiated`; add the caller's DID to `owners`.
-4. `ensure_public_links_are_shared`: commit the existing shared links. `ensure_link_language` does it again once the link language is loaded.
+4. `share_links_after_publish`: commit every existing shared link the link language lacks; if that commit fails, queue them as one pending diff. `attach_link_language` does it again when the link language attaches while the state is still `NeighbourhoodCreationInitiated`.
 
 Join (`neighbourhood.join(url)`):
 
@@ -29,7 +29,8 @@ Join (`neighbourhood.join(url)`):
 - [api/neighbourhoods_ws.rs](../../../rust-executor/src/api/neighbourhoods_ws.rs): `publish_neighbourhood`, `join_neighbourhood`.
 - [types/domain.rs](../../../rust-executor/src/types/domain.rs): `PerspectiveHandle` (`owners`, `add_owner`, `is_owned_by`), `Neighbourhood`, `DecoratedNeighbourhoodExpression`.
 - [db.rs](../../../rust-executor/src/db.rs): `add_owner_to_neighbourhood`, `get_neighbourhood_owners`.
-- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `ensure_public_links_are_shared`, `update_local_agents`.
+- [perspectives/fallback_sync.rs](../../../rust-executor/src/perspectives/fallback_sync.rs): `share_links_after_publish`.
+- [perspectives/perspective_instance.rs](../../../rust-executor/src/perspectives/perspective_instance.rs): `attach_link_language`, `update_local_agents`.
 - SDK: [core/src/neighbourhood/NeighbourhoodClient.ts](../../../core/src/neighbourhood/NeighbourhoodClient.ts).
 
 </details>

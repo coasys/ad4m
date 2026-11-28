@@ -1,6 +1,6 @@
 # Rust client and CLI
 
-`ad4m-client` (directory `rust-client/`) is the Rust client of the [RPC API](rpc-api.md). Its `Ad4mClient` has sub-clients (`agent`, `perspectives`, `neighbourhoods`, `languages`, `expressions`, `runtime`; no AI sub-client) over one `WsRpcClient`. The `cli/` crate builds two binaries on it: `ad4m`, the operator's command-line client, and `ad4m-executor`, which runs the executor itself (`init`, `run`, `config print`, `log`, `dev`).
+`ad4m-client` (directory `rust-client/`) is the Rust client of the [RPC API](rpc-api.md). Its `Ad4mClient` has sub-clients (`agent`, `perspectives`, `neighbourhoods`, `languages`, `expressions`, `runtime`; no AI sub-client) over one `WsRpcClient`. The `cli/` crate builds two binaries on it: `ad4m`, the operator's command-line client, and `ad4m-executor`, which runs the executor itself (`init`, `run`, `config print`, `log`, `dev`, `claim`, `rekey`, `local-ai install`).
 
 **Why:** Operators of headless executors need a shell tool. The executor itself reuses the client's types, for example `ad4m_client::literal::Literal` in MCP and the perspective code. The executor binary lives in the CLI crate, so one release ships both.
 
@@ -19,9 +19,12 @@
 
 | Command | Does |
 |---|---|
-| `init [--data-path] [--network-bootstrap-seed]` | prepares the data directory and seed |
+| `init [--data-path] [--network-bootstrap-seed] [--operator <did:scid>]` | prepares the data directory and seed; `--operator` records the operator ([Person identity](../identity/person-identity.md)) |
 | `run [flags]` | merges config file, `AD4M_*` and flags ([Executor config](../executor/config.md)), calls `rust_executor::run`, optionally `unlock_agent_at_startup`, then `exit_when_api_fails` |
 | `config print` | prints the merged config with secrets redacted |
+| `claim <offer> [--hint] [--no-wait]` | with the admin credential, claims an identity's offer (`identity.claimOffer`), prints the match code and waits for the confirmation (`identity.joinStatus`) |
+| `rekey` | with the admin credential, on a loopback address only: gives the executor a new main wallet key (`identity.rekey`) |
+| `local-ai install --store --state [--device] [--services]` | downloads the local AI runtimes and models without a running executor |
 
 </details>
 
@@ -33,6 +36,7 @@
 - [cli/src/ad4m.rs](../../../cli/src/ad4m.rs): the `ad4m` binary.
 - [cli/src/startup.rs](../../../cli/src/startup.rs): `get_cap_token`, `data_path`.
 - [cli/src/ad4m_executor.rs](../../../cli/src/ad4m_executor.rs), [cli/src/run_config.rs](../../../cli/src/run_config.rs): the `ad4m-executor` binary.
+- [cli/src/identity.rs](../../../cli/src/identity.rs): `init_with_operator`, `claim`, `rekey`, `admin_credential`.
 - [docs-src/pages/developer-guides/cli.mdx](../../../docs-src/pages/developer-guides/cli.mdx).
 
 </details>

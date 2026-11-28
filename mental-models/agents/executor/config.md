@@ -26,6 +26,7 @@ Settings that decide who the operator is and who can connect:
 | `localhost` | `true` | RPC listener on `127.0.0.1`; `false` binds `0.0.0.0` |
 | `tls` (file: `multi_user_config.tls_config`) | none | HTTPS/WSS on `0.0.0.0:tls_port`; the cleartext listener moves to loopback |
 | `enable_multi_user` (file: `multi_user_config.enabled`) | `false` | managed agents: sign-up and login; see below |
+| `custody_channel` (only the flag `--custody-channel`) | `false` | serve the custody channel to the desktop app's custody service; refused with multi-user mode |
 | `auto_permit_cap_requests` | `true` for `ad4m-executor run` without a config file, else `false` | approve every app capability request for the main agent without the operator |
 | `enable_mcp` (file: `mcp_enabled`), `mcp_port` | `false`, `3001` | MCP server |
 | `port` | `12000` | RPC port |
@@ -36,15 +37,16 @@ The multi-user flag lives in a `settings` row of SQLite. `run()` sets it when `e
 
 Other defaults from `Ad4mConfig::prepare`: `app_data_path = ~/.ad4m`, `run_holochain = true`, `run_dapp_server = true`, Holochain bootstrap and proxy at `bootstrap.ad4m.dev`.
 
-`ad4m-executor config print` prints the merged result with secrets redacted.
+`ad4m-executor config print` prints the merged result with secrets redacted. At runtime the operator reads the config file with `runtime.config` and writes it with `runtime.setConfig`; a key that a flag or an environment variable pins is refused, and without `--config` nothing is written.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/config.rs](../../../rust-executor/src/config.rs): `Ad4mConfig`, `prepare`, `check_admin_credential`, `signing_key_name`, `redacted_json`, `DEFAULT_PORT`, `get_global_config`, `auto_permit_cap_requests`.
-- [rust-executor/src/config_file.rs](../../../rust-executor/src/config_file.rs): `ExecutorConfigFile`, `ExecutorSecrets`, `MultiUserSettings`, `TlsSettings`, `to_ad4m_config`, `INLINE_SECRETS`.
-- [cli/src/run_config.rs](../../../cli/src/run_config.rs): `RunArgs`, the flag/env/file merge, `AD4M_UNLOCK_PASSPHRASE_FILE`.
+- [rust-executor/src/config_file.rs](../../../rust-executor/src/config_file.rs): `ExecutorConfigFile`, `ExecutorSecrets` (`from_env`, with `AD4M_UNLOCK_PASSPHRASE_FILE`), `MultiUserSettings`, `TlsSettings`, `to_ad4m_config`, `INLINE_SECRETS`.
+- [cli/src/run_config.rs](../../../cli/src/run_config.rs): `RunArgs`, the flag/env/file merge.
+- [rust-executor/src/config_rpc.rs](../../../rust-executor/src/config_rpc.rs): `runtime_config`, `set_config`; [api/config_ws.rs](../../../rust-executor/src/api/config_ws.rs): the two RPC methods.
 - [ui/src-tauri/src/app_state.rs](../../../ui/src-tauri/src/app_state.rs): the launcher's `launcher-state.json` and its mapping to `ExecutorConfigFile`.
 - [docs-src/pages/developer-guides/executor-config.mdx](../../../docs-src/pages/developer-guides/executor-config.mdx): every key, with flags and variables.
 

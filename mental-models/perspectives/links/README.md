@@ -2,7 +2,7 @@
 
 A perspective's data is a set of **link expressions**: signed `(source, predicate, target)` triples with an author, a timestamp and a **link status** (`Local` or `Shared`). Each perspective keeps its links in its own Oxigraph store on disk. Every write stores, notifies and commits shared links to the neighbourhood; the order differs per path ([Link write path](write-path.md)).
 
-**Why:** A signature on every link lets any reader check who wrote it, also after the link has synced through a third party. An RDF store gives standard SPARQL over the links that apps write. Links used to live in SQLite rows ([Oxigraph store](oxigraph-store.md) covers the migration).
+**Why:** A signature on every link lets any reader check who wrote it, also after the link has synced through a third party. An RDF store gives standard SPARQL over the links that apps write. Startup moves links still held in SQLite rows into the store ([Oxigraph store](oxigraph-store.md)).
 
 **Parent:** [Perspectives](../README.md)
 

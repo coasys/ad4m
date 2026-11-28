@@ -33,7 +33,12 @@ On the RPC WebSocket, the inline control messages `events.watch`, `events.unwatc
 | `principal` | operator, agent or anonymous |
 | `caps` | the grant's capabilities; every capability for the operator |
 | `grant` | the `LiveGrant` the token acts within; `None` for the operator and anonymous callers |
-| `did` | set at open for a managed agent, lazily for the main agent |
+| `did` | set at open for a managed agent; unset for the main agent |
+| `main_did` | the main agent's DID as last read, with the main key's generation; read again after `identity.rekey` changes the DID |
+| `reach` | who can connect to the listener the session arrived on (loopback or network); an in-process session reads as network |
+| `operator_source` | how the operator proved it: `Credential` or `Loopback`; `None` for other callers |
+
+`is_operator_on_this_machine()` (the operator on a loopback listener) is the one test of a `.local_only()` method ([Access checks](checks.md)).
 
 The request context (`RequestContext`) wraps one `Arc<Session>`, a per-request cancel token and the RPC connection id. It carries no token. Interpretation hands the caller's `Session` to its in-process MCP client, or an in-process session for a pass without a caller.
 
@@ -45,7 +50,7 @@ The MCP server opens one `Session` per MCP session with `Session::open`, and che
 
 <details><summary>Where in the code</summary>
 
-- [rust-executor/src/agent/session.rs](../../../rust-executor/src/agent/session.rs): `Session::{open, in_process, check, ended, over, may, require, acts_as, acts_as_did, managed_did, is_operator}`, `grant_for`, `Principal`, `AuthError::close_code`, `TokenId`.
+- [rust-executor/src/agent/session.rs](../../../rust-executor/src/agent/session.rs): `Session::{open, in_process, check, ended, over, may, require, acts_as, acts_as_did, managed_did, is_operator, is_operator_on_this_machine}`, `OperatorSource`, `grant_for`, `Principal`, `AuthError::close_code`, `TokenId`.
 - [rust-executor/src/agent/grants.rs](../../../rust-executor/src/agent/grants.rs): `LiveGrant`, `Grants::get`.
 - [rust-executor/src/types/domain.rs](../../../rust-executor/src/types/domain.rs): `RequestContext::open`, `user_did`, test constructors.
 - [rust-executor/src/api/ws_rpc.rs](../../../rust-executor/src/api/ws_rpc.rs): `connection_context`, the check on every request, close on refusal.

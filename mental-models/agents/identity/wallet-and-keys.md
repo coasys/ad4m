@@ -16,6 +16,7 @@ The **wallet** stores every Ed25519 key of the executor by name: `main` for the 
 | `main` (`KEY_NAME_MAIN`) | main agent | `AgentService::create_new_keys` on `agent.generate` |
 | the managed agent's DID | managed agent | `AgentService::create_managed_agent_key` on `user.create` |
 | the user's email (shared wallet only) | managed agent | same, through `get_or_create_keypair` |
+| `retired-main:<did>` | an earlier main key, kept for history (local wallet only) | `rekey_main_key` on `identity.rekey`, which then makes a new `main` |
 | `platform` (`KEY_NAME_PLATFORM`) or `wallet_signing_key_name` | JWT signing (hosted mode) | `create_new_keys`, or `unlock` if missing |
 
 Life of the local keystore:
@@ -41,6 +42,7 @@ A locked wallet makes `Session::open` fail with `AuthError::Locked` for every to
 
 - [rust-executor/src/wallet.rs](../../../rust-executor/src/wallet.rs): `WalletBackend` trait, `LocalWallet`, `SharedWallet`, `KeystoreEnvelope`, `KEY_NAME_MAIN`, `KEY_NAME_PLATFORM`, `is_legacy_keystore`.
 - [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `AgentStore` (the `agent.json` shape), `AgentService::{create_new_keys, unlock, lock, try_save, load}`, `create_managed_agent_key`, `wallet_key_for_did`, `is_executor_key_name`, `write_json_atomically`.
+- [rust-executor/src/agent/rekey.rs](../../../rust-executor/src/agent/rekey.rs): `rekey_main_key`, `retired_key_name`.
 - [rust-executor/src/api/agent_ws.rs](../../../rust-executor/src/api/agent_ws.rs): `agent.generate`, `agent.lock`, `agent.unlock`, `unlock_main_agent`.
 - [rust-executor/src/lib.rs](../../../rust-executor/src/lib.rs): wallet backend choice in `run()`, `unlock_agent_at_startup`.
 - [rust-executor/src/config.rs](../../../rust-executor/src/config.rs): `wallet_backend`, `wallet_backend_url`, `wallet_signing_key_name`, `signing_key_name()`.

@@ -15,7 +15,8 @@
 | `neighbourhood.ownOnlineStatus` | the caller's last status on this executor |
 | `neighbourhood.otherAgents` | the link language's `others()` plus all `owners`, without the caller; needs neighbourhood READ on a perspective the caller reaches (`Owns { Perspective }`, as every method here) |
 | `neighbourhood.sendSignal` | signed payload; if the perspective is shared and the recipient is one of its owners (the main agent for an unowned perspective), publish locally; else send through the link language |
-| `neighbourhood.sendBroadcast` | publish locally to each owner (the main agent for an unowned perspective), except the main agent when it sent it, then answer; the send through the link language runs after that, in order, from a per-perspective queue of at most 8 (`MAX_PENDING_BROADCASTS`; a full queue fails the RPC), and is skipped when every member is verified local; with `loopback` it is also published to every owner as if it came from the link language |
+| `neighbourhood.sendBroadcast` | publish locally to each owner (the main agent for an unowned perspective), the sender's own agent included, then answer; the send through the link language runs after that, in order, from a per-perspective queue of at most 8 (`MAX_PENDING_BROADCASTS`; a full queue fails the RPC; a newer call presence beat of the same sender, device and call replaces a queued one), and is skipped when every member is verified local; with `loopback` it is also published to every owner as if it came from the link language |
+| `neighbourhood.hasTelepresence` | whether the link language has a telepresence adapter (`has_telepresence_adapter`); `false` before the link language loads |
 
 Payloads: with `signed: true` (default) the caller sends link expressions and the executor signs the perspective around them. With `signed: false` the caller sends bare links; the executor signs each link and then the perspective (`build_signed_perspective`).
 

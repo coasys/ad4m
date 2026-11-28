@@ -24,7 +24,7 @@ Four install paths exist:
 | Path | Used by | Checks |
 |---|---|---|
 | `language_by_ref(addr)` | RPC `language.get`, model queries, MCP profile tool | proof valid; author trusted, or a template of a trusted source; then `install_language` |
-| `LanguageController::install_language(addr)` | neighbourhood publish, `ensure_link_language`, the background load after `applyTemplate` and the MCP clone, `language_by_ref` | hash only. One install per address at a time; a second caller waits, then finds the language loaded. A bundle on disk is only hash-checked. Otherwise one source request, then one meta request, each with a 30 s timeout (`LANGUAGE_FETCH_TIMEOUT`). A missing source fails the install; a missing meta does not |
+| `LanguageController::install_language(addr)` | neighbourhood publish, `ensure_link_language`, the background load after `applyTemplate` and the MCP clone, `applyTemplateLocal`, `language_by_ref` | hash only. One install per address at a time; a second caller waits, then finds the language loaded. A bundle on disk is only hash-checked. Otherwise one source request, then one meta request, each with a 30 s timeout (`LANGUAGE_FETCH_TIMEOUT`). A missing source fails the install; a missing meta does not |
 | `install_language_from_address(addr, true)` | system languages, known link languages at boot | hash only; one attempt |
 | `load_installed_languages` | boot | none: loads every `languages/<dir>/bundle.js` |
 
@@ -35,14 +35,15 @@ Publishing:
 1. `language.publish` (refused to user sessions) reads `languagePath` from the executor's file system, hashes it, and calls `expressionCreate({bundle, meta})` on the language language as the main agent.
 2. `language.applyTemplate` builds a templated copy and publishes it as the caller (`ctx.acts_as()`), so managed agents can create neighbourhoods.
 3. `language.publish` then loads the new bundle before it returns. `language.applyTemplate` returns the address first and loads the bundle in the background through `install_language`. A neighbourhood publish with that address waits for this install.
+4. `language.applyTemplateLocal` templates a source bundle already on disk (`apply_template_local`), saves and loads the copy and publishes nothing, so a secret in the template data stays on the executor. It refuses a source with a `var happ = ` line.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
-- [rust-executor/src/languages/mod.rs](../../../../rust-executor/src/languages/mod.rs): `install_language_from_address`, `load_installed_languages`, `install_language`, `language_by_ref`, `save_language_bundle`, `language_remove`.
+- [rust-executor/src/languages/mod.rs](../../../../rust-executor/src/languages/mod.rs): `install_language_from_address`, `load_installed_languages`, `install_language`, `language_by_ref`, `save_language_bundle`, `apply_template_local`, `language_remove`.
 - [rust-executor/src/languages/conductor_languages.rs](../../../../rust-executor/src/languages/conductor_languages.rs): `load_link_and_installed_languages`.
-- [rust-executor/src/api/languages_ws.rs](../../../../rust-executor/src/api/languages_ws.rs): `publish_language`, `apply_template`, `remove_language`, `write_settings`.
+- [rust-executor/src/api/languages_ws.rs](../../../../rust-executor/src/api/languages_ws.rs): `publish_language`, `apply_template`, `apply_template_local`, `remove_language`, `write_settings`.
 - [rust-executor/src/neighbourhoods.rs](../../../../rust-executor/src/neighbourhoods.rs): the install call on publish (`neighbourhood_publish_from_perspective_with_context`).
 - [rust-executor/src/perspectives/perspective_instance.rs](../../../../rust-executor/src/perspectives/perspective_instance.rs): `ensure_link_language`, which installs the link language after a join.
 - [rust-executor/src/types/domain.rs](../../../../rust-executor/src/types/domain.rs): `LanguageMeta`, `LanguageLanguageInput`.

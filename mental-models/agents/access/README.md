@@ -1,6 +1,6 @@
 # Access
 
-Access decides what each caller may do on the executor. Each connection opens one **session** from its token: a **principal** (operator, one agent, or anonymous) plus its capabilities. An agent's token works only while its **grant** does, and the grant holds its capabilities; the operator holds every capability without a grant, and an anonymous session has no token. Before each handler, the method's **method guard** makes its **access checks**: a capability covers the call (`Cap`, `Executor`, `Owns`), and the session's agent owns the data (`Owns`). `Open` makes neither; `Operator` admits the operator only.
+Access decides what each caller may do on the executor. Each connection opens one **session** from its token: a **principal** (operator, one agent, or anonymous) plus its capabilities. An agent's token works only while its **grant** does, and the grant holds its capabilities; the operator holds every capability without a grant, and an anonymous session has no token. Before each handler, the method's **method guard** makes its **access checks**: a capability covers the call (`Cap`, `CapAnyPointer`, `Executor`, `UserOrOperator`, `Owns`), and the session's agent owns the data (`Owns`). `Open` makes neither; `Operator` admits the operator only. A `.local_only()` method admits only the operator on this machine.
 
 **Why:** Each call raises four questions: who is this, what kind of action, whose data, and who may hear about it. `Session` answers the first in one place. The method guard that each RPC method registers answers the next two; each event names who may hear it.
 
@@ -19,10 +19,13 @@ Access decides what each caller may do on the executor. Each connection opens on
 token ──► Session::open ──► Principal  ─┐
                            grant, caps  │   per request: Session::check()  (grant revoked? expired?)
                                         ▼
-  dispatch: Guard (registered per method)     ── Open | Operator | Cap | Executor | Owns
+  dispatch: Guard (registered per method)     ── Open | Operator | Cap | CapAnyPointer
+                                                 | Executor | UserOrOperator | Owns
             capability (403)                  ── what kind of action
             Owns: the owner of the resource   ── whose data (404, missing or not)
             Operator / Executor (403)         ── executor-level calls
+            UserOrOperator (403)              ── own agent; main agent: operator only
+            .local_only() (403)               ── operator on this machine only
   handler:  ctx.acts_as()                     ── the AgentContext to sign, bill, write as
   events:   Event audience + capability      ── who may hear (see Events)
 ```
@@ -31,7 +34,7 @@ token ──► Session::open ──► Principal  ─┐
 |---|---|
 | Who is this? | `Session` / `Principal` (one place) |
 | What kind of action? | `Capability`, checked by the method's `Guard` |
-| Whose data? | the `Guard`: `Owns` (`guards::owns`, `can_access_perspective_with_did`), `Executor`, `Operator` |
+| Whose data? | the `Guard`: `Owns` (`guards::owns`, `can_access_perspective_with_did`), `Executor`, `UserOrOperator`, `Operator` |
 | Who may hear? | the audience and capability of each event, checked by `Session::may_receive` ([Events](../interfaces/events.md)) |
 
 The MCP server opens one `Session` per MCP session with the same `Session::open`, and its tools run the same guards ([Access checks](checks.md)). In multi-user mode a login gives a fixed capability set (`get_user_default_capabilities`, [Capabilities](capabilities.md)), and a user approves apps for its own agent ([App grants](app-grants.md)).

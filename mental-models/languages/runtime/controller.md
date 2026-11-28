@@ -20,16 +20,16 @@ State (each field is an `Arc<tokio::Mutex<…>>`, so a clone of `LanguageControl
 
 Calls:
 
-1. `execute_on_language(addr, js)` resolves the alias and sends `Execute(js, AgentContext::main_agent())`.
-2. `execute_on_language_with_context(addr, js, ctx)` sends the caller's `AgentContext` instead.
+1. `call_language(addr, js, ctx, kind)` resolves the alias and sends `Execute(js, ctx, kind)`.
+2. `execute_on_language(addr, js)` sends `AgentContext::main_agent()` as an ordered call; `execute_on_language_with_context(addr, js, ctx)` sends the caller's `AgentContext` as an ordered call.
 3. `Language::new(addr)` (in `language.rs`) is the typed wrapper for link-language calls: `commit`, `sync`, `current_revision`, `render`, `set_local_agents`, `others`, telepresence. Each method checks the cached language capability set first and returns a default when the language lacks that language capability.
-4. `Language::commit`, `sync`, `render`, `set_local_agents` and the telepresence calls use `execute_on_language`, so link-language calls run as the main agent. Inside the language, `agentDid()` returns the main agent's DID, also for a neighbourhood that a managed agent owns. A link language learns the local owners of its neighbourhood through `peersSetLocal` and `agentGetAllLocalUserDids` ([Managed agents](../../agents/executor/managed-agents.md)).
+4. Every `Language` method sends `AgentContext::main_agent()`, so link-language calls run as the main agent; `others`, the online-agent list, signals and broadcasts run as concurrent calls. Inside the language, `agentDid()` returns the main agent's DID, also for a neighbourhood that a managed agent owns. A link language learns the local owners of its neighbourhood through `peersSetLocal` and `agentGetAllLocalUserDids` ([Managed agents](../../agents/executor/managed-agents.md)).
 
 </details>
 
 <details><summary>Where in the code</summary>
 
-- [rust-executor/src/languages/mod.rs](../../../rust-executor/src/languages/mod.rs): `LanguageController`, `global_instance`, `execute_on_language[_with_context]`, `unload_language`, `reload_language`, `language_remove`, `get_installed_languages`, `write_settings`, `shutdown`.
+- [rust-executor/src/languages/mod.rs](../../../rust-executor/src/languages/mod.rs): `LanguageController`, `global_instance`, `call_language`, `execute_on_language[_with_context]`, `unload_language`, `reload_language`, `language_remove`, `get_installed_languages`, `write_settings`, `shutdown`.
 - [rust-executor/src/languages/language.rs](../../../rust-executor/src/languages/language.rs): `Language`, the per-capability call wrappers.
 - [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `LanguageRuntimeHandle::execute` (sends `AgentContext::main_agent()`), `execute_with_context`.
 - [rust-executor/src/languages/error.rs](../../../rust-executor/src/languages/error.rs): `LanguageError`.

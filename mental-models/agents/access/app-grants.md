@@ -34,7 +34,7 @@ app (anonymous)                executor                                approver 
 
 JWT claims (`Claims`), signed HS256 with the wallet's JWT signing key (`signing_key_name()`): `iss` (the signing key's DID), `aud` (app name), `iat`, `exp`, `nonce` (a UUID: the token id, which names the grant) and `sub` (a managed agent's DID; none for the main agent). The token carries no capabilities: the grant holds them.
 
-Revocation acts on the grants of the caller's own agent (the operator: any grant). `agent.revokeToken { token }` takes the request id (which the SDK sends) or the JWT and revokes the grant. `agent.removeApp` deletes it. `user.logout` revokes the caller's grant, `user.revokeAllSessions` every grant on that user's agent. Each revocation closes the grant's sockets at once. `agent.getApps` lists the grants on the caller's agent, without tokens. A grant has no refresh. At start, `load_at_start` deletes the rows of expired tokens and loads the rest.
+Revocation acts on the grants of the caller's own agent (the operator: any grant). `agent.revokeToken { token }` takes the request id (which the SDK sends) or the JWT and revokes the grant. `agent.removeApp` deletes it. `user.logout` revokes the caller's grant, `user.revokeAllSessions` every grant on that user's agent. Each revocation closes the grant's sockets at once. `identity.rekey` revokes every grant whose token the old main key signed: all grants when `main` is the signing key, else the grants on the main agent. `agent.getApps` lists the grants on the caller's agent, without tokens. A grant has no refresh. At start, `load_at_start` deletes the rows of expired tokens and loads the rest.
 
 With `auto_permit_cap_requests`, `agent.requestCapability` permits a request for the main agent at once. The code is printed only with `AD4M_LOG_SECRETS=1`.
 
@@ -42,7 +42,7 @@ With `auto_permit_cap_requests`, `agent.requestCapability` permits a request for
 
 <details><summary>Where in the code</summary>
 
-- [rust-executor/src/agent/grants.rs](../../../rust-executor/src/agent/grants.rs): `LiveGrant`, `Grants` (`get`, `find`, `revoke`, `revoke_agent`, `remove`, `list`), `mint`, `load_at_start`.
+- [rust-executor/src/agent/grants.rs](../../../rust-executor/src/agent/grants.rs): `LiveGrant`, `Grants` (`get`, `find`, `revoke`, `revoke_agent`, `revoke_all`, `remove`, `list`), `mint`, `load_at_start`.
 - [rust-executor/src/db/grants.rs](../../../rust-executor/src/db/grants.rs): the `grants` table.
 - [rust-executor/src/agent/capabilities/mod.rs](../../../rust-executor/src/agent/capabilities/mod.rs): `request_capability`, `requested_agent`, `request_target`, `permit_capability_within`, `caps_within`, `grant_caps_for`, `generate_capability_token`, `DEFAULT_TOKEN_VALID_PERIOD`.
 - [rust-executor/src/agent/capabilities/pending.rs](../../../rust-executor/src/agent/capabilities/pending.rs): `PendingRequests` (memory only), `RequestTarget`, `MAX_CODE_ATTEMPTS`, the request lifetimes, `MAX_PENDING_REQUESTS`, `MAX_PENDING_REQUESTS_PER_TARGET`.

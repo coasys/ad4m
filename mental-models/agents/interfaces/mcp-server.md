@@ -30,7 +30,7 @@ Binding (`resolve_host`, `resolve_plain_host`, `start_tls_listener`), with no `M
 
 An explicit `MCP_HOST` environment variable sets the plain listener's address in every row; without a credential and off loopback it only logs a warning. The HTTPS listener always binds `0.0.0.0` (`resolve_host`, `start_tls_listener` in [server.rs](../../../rust-executor/src/mcp/server.rs)).
 
-The mention waker: `get_mention_waker_config` returns one subscription with two model queries over built-in abstract classes. `mentionQuery` reads `ad4m://Mentioning` (`{ mentions }`): records whose `mentions` relation links the agent's DID. `query` reads `ad4m://TextContent` (`{ text }`): records whose text contains one of the agent's profile names or its DID. Both match only links another agent wrote whose signature verifies. The SDK's `WakerSubscriptionManager` opens both with `perspective.modelSubscribe` under one id, so a record both find wakes the agent once.
+The mention waker: `get_mention_waker_config` returns one subscription with two model queries over built-in abstract classes. `mentionQuery` reads `ad4m://Mentioning` (`{ mentions }`): records whose `mentions` relation links the agent's DID. `query` reads `ad4m://TextContent` (`{ text }`): records whose text contains one of the agent's profile names or its DID. Both match only links another agent wrote whose signature verifies. The SDK's `WakerSubscriptionManager` opens each as a `LiveQuery` over `perspective.subscribe`, both under one waker subscription, so a record both find wakes the agent once.
 
 The interpretation harness calls the same tools in the process (`mcp/tools/harness_bridge.rs`), with the dynamic tools included.
 

@@ -11,21 +11,23 @@ An **agent profile** is a DID, its **public perspective** (signed links that des
 | Agent | Stored in | Published by |
 |---|---|---|
 | Main agent | `ad4m/agent.json` (`AgentStore.agent`); `ad4m/agentProfile.json` is read first if it exists | `spawn_main_agent_publish` after `agent.generate` / `agent.unlock`; `agent.updateProfile` |
-| Managed agent | `ad4m/users/<email>/profile.json` (named by email, because a DID contains `:`; `user_profile_path`) | `user.create`; `agent.updateProfile` in a user session |
+| Managed agent | `ad4m/users/<email>/profile.json` (named by email, because a DID contains `:`; `user_profile_path`) | `user.create`; `agent.updateProfile` in a user session; `publish_managed_profiles` after the main agent unlocks |
 
 1. `agent.updateProfile { publicPerspective?, dmLanguage? }` needs `agent/UPDATE`. A user session updates only its own profile (`update_user_profile`). Any other session updates the main agent's profile.
 2. RPC turns each link into a `DecoratedLinkExpression` with `link_expression_input_to_decorated`. That function drops the caller's `valid` field and verifies the signature on this executor.
-3. `AgentService::publish_agent_to_language(ctx)` strips link decorations and calls `expression_create` on the agent language as that agent. A process-wide lock (`AGENT_PUBLISH_LOCK`) makes the last publish carry the latest profile. The lock serialises the publishes of all agents on the executor.
+3. `AgentService::publish_agent_to_language(ctx)` strips link decorations and calls `expression_create` on the agent language as that agent. A process-wide lock (`AGENT_PUBLISH_LOCK`) makes the last publish carry the latest profile. The lock serialises the publishes of all agents on the executor. When the agent's key speaks for a `did:scid` person, `publish_profile` then publishes the **person profile** under the `did:scid` (`publish_person_profile`, `PUT /v1/agents/{did:scid}` through the agent language). A failure there is logged, and the next publish tries again ([Person identity](person-identity.md)).
 4. `agent.byDid(did)` answers the main agent's DID from memory. Any other DID goes to the agent language (`get_expression`), also a managed agent on the same executor. The executor verifies those links again.
-5. The SDK's `AgentClient.mutatePublicPerspective` builds the new link set, then calls `agent.updateProfile`.
-6. `agent-updated` events carry the new profile.
+5. `agent.get` answers `AgentWithIdentity { agent, identity }`: `identity` is the `did:scid` the agent speaks for, or none.
+6. The SDK's `AgentClient.mutatePublicPerspective` builds the new link set, then calls `agent.updateProfile`.
+7. `agent-updated` events carry the new profile.
 
 </details>
 
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/api/agent_ws.rs](../../../rust-executor/src/api/agent_ws.rs): `agent.get`, `agent.byDid`, `agent.byDIDs`, `agent.updateProfile`, `update_user_profile`, `publish_agent_updated`.
-- [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `publish_agent_to_language`, `get_agent_for_context`, `user_profile_path`, `load_managed_agent_profile`, `store_managed_agent_profile`, `agent_to_publish_json`.
+- [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `publish_agent_to_language`, `publish_profile`, `publish_managed_profiles`, `get_agent_for_context`, `user_profile_path`, `load_managed_agent_profile`, `store_managed_agent_profile`, `agent_to_publish_json`.
+- [rust-executor/src/identity/person.rs](../../../rust-executor/src/identity/person.rs): `person_record`, `publish_person_profile`.
 - [rust-executor/src/types/domain.rs](../../../rust-executor/src/types/domain.rs): `Agent`, `Perspective::verify_link_signatures`.
 - [core/src/agent/AgentClient.ts](../../../core/src/agent/AgentClient.ts) and [core/src/agent/Agent.ts](../../../core/src/agent/Agent.ts): SDK side.
 - [rust-executor/src/mcp/tools/profiles.rs](../../../rust-executor/src/mcp/tools/profiles.rs): profile tools for MCP clients.

@@ -62,6 +62,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Consensus rule** (`ConsensusRule` in `shacl_parser.rs`, `ConsensusRule.from_role`): The number of different DIDs that must sign a transition proposal before the transition settles. An optional role is a model query that each voter must match at the time of the vote. Example: "The consensus rule needs two DIDs with the role `reviewer`." [Flows](perspectives/social-dna/flows/README.md)
 
+**Device key** (an agent's `did:key` in a `did:scid` key log, `record_agent_if_listed`): An agent key that the person's key log lists as one of its devices; the agent then speaks for the person. The executor holds device keys only, never the master keys. Example: "The phone's agent is a device key of the person's identity." [Person identity](agents/identity/person-identity.md)
+
 **Endpoint** (`Endpoint`, `EndpointKind`, `ai_endpoints` table, `ai.addEndpoint`): A model server that the AI service sends requests to, such as Ollama, llama-server, vLLM, OpenAI, Anthropic or a speech server. It holds the URL, the key, the health and the request limits. An AI model names one endpoint. A managed endpoint is one that local AI registers. Example: "`ai.addEndpoint` registers the llama-server at `127.0.0.1:12460`." [AI service](agents/executor/services/ai.md)
 
 **Entanglement proof** (`EntanglementProof`, `entanglement_service`): Two signatures, one in each direction, that link the main agent's DID to another key, such as a device key or a Holochain agent key. Example: "The entanglement proof ties the Holochain agent key to the main agent's DID." [Signing and verification](agents/identity/signing-and-verification.md)
@@ -96,6 +98,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Hosted mode** (`wallet_backend = "shared"`, `db_backend = "shared"`, `SharedWallet`, `SharedDb`, `wallet_backend_url`, `db_backend_url`): An executor that reads its wallet, its users and the shared perspective metadata over HTTP from a hosting service. All other tables stay in the executor's own SQLite database. Identifiers keep the word `shared`. Example: "In hosted mode the executor reads its wallet from the hosting service." [Executor data](agents/executor/data.md)
 
+**Identity store** (`identity-store/`, `identity.storeUrl`, `identity.storeKeys`): The shared store of key logs and agent records that the agent language reads and writes. The executor accepts a log head only when one of `identity.storeKeys` signed it. Example: "The agent language fetches the key log from the identity store." [Person identity](agents/identity/person-identity.md)
+
 **Installing (a language)** (`language_by_ref`, `install_language`, `install_language_from_address`): Getting a bundle by its address, checking its hash, saving it and loading it into a language isolate. Example: "Installing a language checks the bundle's hash against its address." [Installing languages](languages/runtime/installing/README.md)
 
 **Instance** (`create_subject`, `update_subject`, MCP `instance_*` tools): A base whose links match the shape of a subject class. The full name is subject instance. Example: "`instance_create` makes an instance of `Message`." [Subject classes](perspectives/social-dna/subject-classes.md)
@@ -103,6 +107,8 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 **Interpretation** (`run_interpretation`, `InterpretationRun`): An executor pass that sends a transcript and the perspective's subject classes to an LLM and writes what the LLM extracts as instances. Each run stores an `InterpretationRun` with the model, prompt version, time and sources. Example: "The interpretation run extracted three tasks from the call transcript." [Interpretation](perspectives/social-dna/interpretation/README.md)
 
 **Interpretation overlay** (`InterpretationOverlay`): A second instance on the same base that records the values the LLM inferred and the run that wrote them. A person uses it to accept or reject those values. Example: "The person accepts the interpretation overlay, and the values go to the real instance." [Interpretation overlay](perspectives/social-dna/interpretation/overlay.md)
+
+**Key log** (`KelCache`, `ad4m-hash-chain/`, `ad4m-identity-core/`): The signed chain of events that defines a `did:scid` identity: its master keys and its device keys. The executor keeps each log it checked and trusts it up to the seq of the last store-signed head. Example: "Removing a device adds an event to the key log." [Person identity](agents/identity/person-identity.md)
 
 **Keystore** (`AgentStore.keystore`, `KeystoreEnvelope`): The encrypted form of all wallet keys in `agent.json`. Example: "The operator's passphrase unlocks the keystore." [Wallet and keys](agents/identity/wallet-and-keys.md)
 
@@ -138,7 +144,7 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Literal expression** (`Literal`, `literal_encode`, `literal_decode`): A value that its URL holds in full: `literal:string:`, `literal:number:`, `literal:boolean:` or `literal:json:`. Example: "The link's target is the literal expression `literal:string:hello`." [Literal expressions](languages/expressions/literals.md)
 
-**Live query** (`SubscribedQuery`, `perspective.subscribeQuery`, `perspective.modelSubscribe`): A SPARQL query or model query that the executor runs again after relevant writes. The executor sends each change of the result only to the RPC connection that opened the query. Identifiers and event names keep the word "subscription"; prose says "live query". Example: "The app opens a live query and gets each change of the result." [Live queries](perspectives/querying/live-queries.md)
+**Live query** (`SubscribedQuery`, `perspective.subscribe`, SDK `LiveQuery`): A SPARQL query or model query that the executor runs again after relevant writes. The executor sends each change of the result only to the RPC connection that opened the query. Identifiers and event names keep the word "subscription"; prose says "live query". Example: "The app opens a live query and gets each change of the result." [Live queries](perspectives/querying/live-queries.md)
 
 **Local AI** (`ai_service/local/`, `ai.localInstall`): The AI service part that installs model servers and models on the device, supervises them as child processes and registers them as managed endpoints. It downloads only when the operator asks. Example: "Local AI installs llama-server and registers it as a managed endpoint." [AI service](agents/executor/services/ai.md)
 
@@ -176,9 +182,13 @@ This file defines each term that ADAM uses in its own way, once, in alphabetical
 
 **Operator** (`Principal::Operator`): The administrator role of the executor, which the caller who presents the admin credential holds. On an executor with no admin credential, a caller with no token on a loopback listener holds it. The operator is not an agent and acts as the main agent. Example: "Only the operator can start multi-user mode." [Operator and main agent](agents/access/operator-and-main-agent.md)
 
+**Operator record** (`record_operator_at_init`, `operator_record`, `first_link_check`): The `did:scid` that `ad4m-executor init --operator` records as the operator's identity. The main agent's first link to an identity must go to it. Example: "The main agent can join only the identity the operator record names." [Person identity](agents/identity/person-identity.md)
+
 **Owner** (`PerspectiveHandle.owners`, `is_owned_by`): An agent whose DID is in the `owners` list of a perspective, which lets the agent reach that perspective. Agents of one executor that join the same neighbourhood share one perspective as its owners. Example: "Alice and Bob are owners of the shared perspective on this executor." [Access checks](agents/access/checks.md)
 
 **Oxigraph store** (`SparqlStore` in `perspectives/sparql_store.rs`, `make_reifier_iri`): The store that holds all links of one perspective, on RocksDB. For each link, a reifier holds the author, timestamp, proof, verdict and link status. Example: "The Oxigraph store keeps the link's proof on its reifier." [Oxigraph store](perspectives/links/oxigraph-store.md) — not: SPARQL store
+
+**Person identity** (`did:scid:coasys:1`, `rust-executor/src/identity/`): A person's DID, defined by a key log that the person's master keys sign. Agents whose keys the log lists as devices speak for the person. Example: "The laptop and phone agents speak for one person identity." [Person identity](agents/identity/person-identity.md)
 
 **Perspective** (`PerspectiveInstance`, `PerspectiveHandle`): A graph of signed links that the executor stores for one or more owners. Example: "Alice's perspective holds her notes as links." [Perspectives](perspectives/README.md)
 

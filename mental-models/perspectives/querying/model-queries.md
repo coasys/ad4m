@@ -18,7 +18,7 @@ Every model query goes through `run_model_query` ([perspective_instance/runner.r
 6. **Getters and relations**: SPARQL `ASK` / `SELECT` getters, reverse relations, recursive `include`.
 7. **Projections**: counts and lists over relation edges.
 
-Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `after`, `count`, `properties`, `include`, `projections`, `parent` scope, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`.
+Query input (`ModelQueryInput`): `where`, `order`, `limit`, `offset`, `after`, `count`, `properties`, `include`, `projections`, `parent` scope, `deepQuery`, `polymorphic`, `preferClasses`, `linkStatus`, `includeUnverified`, `links` (the links behind named properties or predicates, under `__links`).
 `after` is a keyset cursor: `""` for the first page, then the previous reply's `nextCursor`, for the timestamp order only; any other query that sends it is refused ([model_query/cursor.rs](../../../rust-executor/src/perspectives/model_query/cursor.rs), `KeysetCursor`).
 By default only links whose signature verifies are read. Several classes in one query go through `execute_union_query`. Abstract classes (for example the built-ins `ad4m://TextContent` and `ad4m://Mentioning`) resolve to the concrete classes that implement them.
 

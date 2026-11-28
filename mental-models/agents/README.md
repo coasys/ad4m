@@ -7,7 +7,7 @@ An **agent** is a DID with an Ed25519 key pair; the executor signs and stores da
 **Parent:** [ADAM](../README.md)
 
 ## Parts
-- [Identity](identity/README.md): an agent in code: its DID, its key in the wallet, how it signs, its profile.
+- [Identity](identity/README.md): an agent in code: its DID, its key in the wallet, how it signs, its profile, the person identity it can speak for.
 - [Executor](executor/README.md): the process that hosts the agents: startup, config, data, managed agents, executor services.
 - [Access](access/README.md): what each caller may do: sessions, the operator, capabilities, app grants, access checks.
 - [Executor interfaces](interfaces/README.md): how callers reach the executor: WebSocket RPC, events, MCP, SDKs, CLI.

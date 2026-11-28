@@ -18,6 +18,8 @@ A language bundle is an ES module. It exports `init`, `teardown`, `name` and a f
 | `Telepresence*` (4) | `telepresenceSetOnlineStatus`, `…GetOnlineAgents`, `…SendSignal`, `…SendBroadcast` |
 | `LanguageGetSource` | `languageGetSource` |
 | `HolochainSignal` | `handleHolochainSignal` |
+| `Identity*` (12), agent language only | `identityLog`, `identityHead`, `identityAppend`, `identityKeyOwner`, `identityPowParams`, `identityAttachNote`, `identityPutAgent`, `identityOpenOffer`, `identityListOffers`, `identityCancelOffer`, `identityClaimOffer`, `identityOfferState` |
+| `Token*` (4), agent language only | `tokenAssets`, `tokenBalance`, `tokenSend`, `tokenReceived` |
 
 There is no direct-message language capability: direct messages are not implemented.
 

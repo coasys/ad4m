@@ -18,7 +18,7 @@ The language language has its own page under [Installing languages](../runtime/i
 | Package | Kind | Backend | In the default seed |
 |---|---|---|---|
 | `language-language` | language store | Cloudflare KV | yes, alias `lang` ([Language language](../runtime/installing/language-language.md)) |
-| `centralized-agent-language` | agent | HTTP | yes, alias `did` |
+| `centralized-agent-language` | agent | HTTP, the identity store | yes, alias `did` |
 | `agent-language` | agent | Holochain | no |
 | `neighbourhood-language` | neighbourhood | Cloudflare KV | yes, alias `neighbourhood` |
 | `perspective-language` | perspective | none: stores nothing | yes, alias `perspective` |
@@ -32,11 +32,11 @@ What the executor needs from each fixed-role language:
 | Alias | Executor call that uses it |
 |---|---|
 | `lang` | `install_language` and `language_by_ref` fetch bundles and meta; `runtime.linkLanguageTemplates` and the MCP template list read metas; `language.publish` and `applyTemplate` store them |
-| `did` | `publish_agent_to_language` stores profiles; `agent.byDid` and `expression.get("did:…")` read them |
+| `did` | `publish_agent_to_language` stores profiles; `agent.byDid` and `expression.get("did:…")` read them; `agent_language_for` sends the identity and token calls |
 | `neighbourhood` | `create_neighbourhood_with_context` on publish; `get_neighbourhood` on join |
 | `perspective` | none: the executor loads it and registers the alias; the language stores nothing |
 
-The HTTP languages keep their back-end hosts (the development profile directory `mock.ad4m.dev`, a Cloudflare Worker) as constants in their source, not as settings. Some import helper modules from `esm.sh` or `deno.land` URLs, which esbuild bundles at build time.
+The other HTTP languages keep their back-end hosts (a Cloudflare Worker, easscan.org) as constants in their source, not as settings; the agent language reads the identity store's URL from its `storeUrl` setting. Some import helper modules from `esm.sh` or `deno.land` URLs, which esbuild bundles at build time.
 
 </details>
 

@@ -32,7 +32,11 @@ socket: /api/v1/ws (the only event socket)
 | `apps-changed`, capability requests and notification install requests in `exception-occurred` | the agent that the approval is for, with `agent/PERMIT` ([App grants](../access/app-grants.md)) |
 | `sfu-*` | the participant or the room members that the event names; `sfu-room-roster` after a departure also goes to the departed DID ([SFU](../executor/services/sfu.md)) |
 | `hosting-user-info-changed` | the user it names, with `RUNTIME_HOSTING_READ`; a copy to the main agent, with `RUNTIME_USER_MANAGEMENT_READ` |
-| `model-loading-status`, other exceptions | everyone |
+| `ai-session-changed` | the session's owner |
+| `ai-endpoint-status` | the main agent |
+| `ai-local-progress`, `config-changed` | the operator |
+| `identity-fork` | the local agents that speak for the identity ([Person identity](../identity/person-identity.md)) |
+| `model-status`, other exceptions | everyone |
 
 1. Only an authenticated session (operator or a grant) gets a stream. An anonymous socket gets none.
 2. `Session::may_receive`: a DID audience matches the DID that the session acts as (`acts_as_did`). The operator acts as the main agent, so it gets the main agent's events, not other agents'. The session must also hold the event's capability: the one that the RPC method for the same data checks (`Topic::capability`). A per-perspective event needs the query capability on its perspective, a signal neighbourhood READ on it.

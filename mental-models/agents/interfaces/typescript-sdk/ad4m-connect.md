@@ -12,7 +12,7 @@
 |---|---|---|
 | Local executor | `requestCapability()` → person approves in the launcher → `verifyLocalAd4mCode(code)`: the capability-request flow of [App grants](../../access/app-grants.md) | app grant on the main agent |
 | Remote, multi-user | `isMultiUser()`; `loginWithPassword`, or `submitEmail` + `verifyEmailCode`, or `createAccount` | user token (managed agent) |
-| Guest | `connectAsGuest(hostUrl)`: random `guest-<uuid>@flux.demo` email and password in `localStorage`, `user.login`, and `user.create` + `user.login` when that fails | user token |
+| Guest | `connectAsGuest(hostUrl)`: a guest with an email and password stored for that host in `localStorage` logs in with `user.login`; a new guest gets a random `guest-<uuid>@flux.demo` email and password, `user.create` + `user.login`, and they are stored only after both succeed | user token |
 | Embedded | wait for `AD4M_CONFIG` from `window.parent`; the origin is checked against `allowedOrigins` when the app sets it, and proxy mode requires it | the parent's token |
 
 1. `connect()` runs the health check and the first authenticated read together. Before the health check passes, the token goes only to the URL where it was last accepted; a new URL gets it after its health check passes.

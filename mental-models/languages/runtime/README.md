@@ -33,6 +33,6 @@ The **language runtime** is the part of the executor that loads and runs languag
 - [rust-executor/src/languages/language_runtime_handle.rs](../../../rust-executor/src/languages/language_runtime_handle.rs): `spawn`, `execute`, `execute_with_context`.
 - [rust-executor/src/languages/language_runtime.rs](../../../rust-executor/src/languages/language_runtime.rs): `LanguageRuntime`, `LanguageOperation`, `process_requests`.
 - [rust-executor/src/languages/language_context.rs](../../../rust-executor/src/languages/language_context.rs): `LanguageContext`.
-- [rust-executor/src/api/languages_ws.rs](../../../rust-executor/src/api/languages_ws.rs): RPC `language.all`, `get`, `meta`, `source`, `publish`, `applyTemplate`, `remove`, `writeSettings`.
+- [rust-executor/src/api/languages_ws.rs](../../../rust-executor/src/api/languages_ws.rs): RPC `language.all`, `get`, `meta`, `source`, `publish`, `applyTemplate`, `applyTemplateLocal`, `remove`, `writeSettings`.
 
 </details>

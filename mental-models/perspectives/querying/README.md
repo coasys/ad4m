@@ -19,7 +19,7 @@ The executor answers four kinds of read over one perspective's Oxigraph store. *
 | `perspective.querySparql` | SPARQL (`engine: "sparql"`) | `sparql_query_cancellable` → `query_arbitrary` |
 | `perspective.modelQuery` | model query | `model_query` → `execute_model_query` |
 | `perspective.subjectClassesOf` | SPARQL conformance | `subject_classes_of` |
-| `perspective.subscribeQuery`, `perspective.modelSubscribe` | live query | `subscribe_and_query`, `model_subscribe_and_query` |
+| `perspective.subscribe` (`sparql` or `model`) | live query | `subscribe_and_query`, `model_subscribe_and_query` |
 
 Every method checks the perspective query capability and owner access first (see [Capabilities](../../agents/access/capabilities.md) and [Access checks](../../agents/access/checks.md)).
 

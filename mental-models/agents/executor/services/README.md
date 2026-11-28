@@ -20,10 +20,10 @@ Email and the **runtime service** (bootstrap seed, trust and friend lists, notif
 |---|---|---|---|
 | AI | `AIService::global_instance()` | `api/ai_ws.rs` (`ai.*`), `api/openai_compat/` (`/v1`) | no |
 | SFU | `get_sfu_service()` | `api/sfu_ws.rs` (`sfu.*`) | no |
-| Holochain | `get_holochain_service()` and two softer accessors | none of its own | yes, 14 ops |
+| Holochain | `get_holochain_service()` and two softer accessors | none of its own | yes, 15 ops |
 | Billing / Unyt | free functions in `billing.rs`, `unyt_service.rs` | `api/hosting_ws.rs` (`hosting.*`), `runtime.unyt*`, `runtime.setHostRates` | not directly; the Unyt app through the Holochain ops |
 | Email | `EmailService` | through user signup and login | no |
-| Runtime | `RuntimeService` (seed, trusted agents, known link languages, friends, outbox) | `api/runtime_ws.rs` (`runtime.*`: info, quit, friends, notifications, export and import, link-language templates) | yes: `friends`, `add_message_outbox`, `get_trusted_agents` ops |
+| Runtime | `RuntimeService` (seed, trusted agents, known link languages, friends, outbox) | `api/runtime_ws.rs` (`runtime.*`: info, quit, restart, friends, notifications, export and import, link-language templates) | yes: `friends`, `add_message_outbox`, `get_trusted_agents` ops |
 
 Direct messages are not implemented: `runtime.sendFriendMessage` answers 501, and `runtime.inbox` answers an empty list ([runtime_ws.rs](../../../../rust-executor/src/api/runtime_ws.rs)).
 

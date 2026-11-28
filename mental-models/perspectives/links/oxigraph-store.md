@@ -34,7 +34,7 @@ Each perspective has one **Oxigraph store** (`SparqlStore`): an RDF store on Roc
 - [perspectives/sparql_store.rs](../../../rust-executor/src/perspectives/sparql_store.rs): `SparqlStore::new`, `add_link`, `remove_link`, `add_remote_link`, `remove_remote_link`, `proof_write`, `is_link_metadata`, `purge_link_metadata_links`, `insert_link_triples`, `query_links`, `query_links_top_n_by_timestamp`, `query_arbitrary`, `validate_readonly_query`, `decorated_links_query`, `backup`, `reload`.
 - [perspectives/migration.rs](../../../rust-executor/src/perspectives/migration.rs): `migrate_links_from_rusqlite_to_sparql`.
 - [perspectives/mod.rs](../../../rust-executor/src/perspectives/mod.rs): `set_app_data_path`, `initialize_from_db`, `sweep_link_metadata`.
-- [perspective_snapshot.rs](../../../rust-executor/src/perspective_snapshot.rs): `create_snapshot`, `restore_snapshot`, `backup_perspectives`, `spawn_periodic_backup`.
+- [perspective_snapshot.rs](../../../rust-executor/src/perspective_snapshot.rs): `create_snapshot`, `restore_perspectives` (startup), `restore_snapshot`, `backup_perspectives`, `spawn_periodic_backup`.
 - [perspectives/memory_diagnostics.rs](../../../rust-executor/src/perspectives/memory_diagnostics.rs): periodic memory stats per store.
 
 </details>

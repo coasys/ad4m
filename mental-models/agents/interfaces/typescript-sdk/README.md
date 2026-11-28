@@ -1,6 +1,6 @@
 # TypeScript SDK
 
-`@coasys/ad4m` (directory `core/`) is the TypeScript client of the [RPC API](../rpc-api.md). `Ad4mClient` groups the calls by namespace (`agent`, `perspective`, `neighbourhood`, `languages`, `expression`, `runtime`, `ai`). All namespaces share one `ApiClient`, which owns the WebSocket, matches replies to calls, sends `events.watch` and reconnects. The package also holds the shared types and the model class decorators.
+`@coasys/ad4m` (directory `core/`) is the TypeScript client of the [RPC API](../rpc-api.md). `Ad4mClient` groups the calls by namespace (`agent`, `perspective`, `neighbourhood`, `languages`, `expression`, `runtime`, `ai`, `identity`). All namespaces share one `ApiClient`, which owns the WebSocket, matches replies to calls, sends `events.watch` and reconnects. The package also holds the shared types and the model class decorators.
 
 **Why:** Apps call typed methods, not raw messages. The types come from the executor's own contracts (`core/src/generated/api/`), so a change on one side breaks the build on the other. A refused token is final for that client (`onAuthFailed`), so an app cannot loop on a dead credential.
 
@@ -27,6 +27,7 @@
 - [core/src/Ad4mClient.ts](../../../../core/src/Ad4mClient.ts): `Ad4mClient`, the sub-client getters.
 - [core/src/apiClient.ts](../../../../core/src/apiClient.ts): `ApiClient`, `RpcError`, `LONG_TIMEOUT_MS`, `onAuthFailed`, `onReconnect`.
 - [core/src/agent/AgentClient.ts](../../../../core/src/agent/AgentClient.ts): agent, auth and user calls.
+- [core/src/identity/IdentityClient.ts](../../../../core/src/identity/IdentityClient.ts): the `identity.*` calls ([Person identity](../../identity/person-identity.md)).
 - [core/src/generated/api/](../../../../core/src/generated/api): `RpcMethods.ts` (`RpcMethods`, `READ_METHODS`, `LONG_METHODS`), `Events.ts`, one file per wire type. `generate:api-types` writes these files; [index.ts](../../../../core/src/generated/api/index.ts) is written by hand and needs an export line for each new type.
 - [core/src/perspectives/](../../../../core/src/perspectives), [core/src/model/](../../../../core/src/model), [core/src/shacl/](../../../../core/src/shacl): perspective proxy and models (see [Model classes](model-classes.md)).
 - [ad4m-hooks/](../../../../ad4m-hooks): React and Vue hooks.

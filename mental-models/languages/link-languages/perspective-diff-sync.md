@@ -13,6 +13,7 @@
 3. `perspectiveSyncSync()`: `create_did_pub_key_link` for each local agent, zome `sync`, then gossip:
    - collect peers from `get_online_agents` and from received broadcasts (dropped after 30 s);
    - scribe = the lowest DID in `[peers…, myDid]`, sorted. Each agent computes this from the peers it sees;
+   - with peers but no known peer revision, zome `latest_revision` gives one;
    - for each peer revision that differs, zome `pull({hash, is_scribe})`. A fast-forward applies at once; a merge only on the scribe;
    - report `Synced` or `LinkLanguageInstalledButNotSynced` (more distinct peer revisions differ from its own than match it).
 4. Pulled diffs go to the executor through `linkSyncAddCallback`.
@@ -25,8 +26,8 @@
 - [bootstrap-languages/p-diff-sync/index.ts](../../../bootstrap-languages/p-diff-sync/index.ts): the language (gossip, scribe choice, exports).
 - [bootstrap-languages/p-diff-sync/online-agents.ts](../../../bootstrap-languages/p-diff-sync/online-agents.ts): online agent list.
 - [bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/lib.rs](../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/lib.rs): zome externs.
-- [bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/link_adapter/](../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/link_adapter): `commit`, `pull`, `render`, `snapshots`, `chunked_diffs`, `topo_sort`, `workspace`.
-- [bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync_integrity/src/lib.rs](../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync_integrity/src/lib.rs): entry types (`PerspectiveDiffEntryReference`, `Snapshot`, `HashReference`, `LocalHashReference`, `LocalTimestampReference`, `Anchor`) and the `HashBroadcast` signal payload.
+- [bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/link_adapter/](../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync/src/link_adapter): `commit`, `pull`, `render`, `revisions`, `snapshots`, `chunked_diffs`, `topo_sort`, `workspace`.
+- [bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync_integrity/src/lib.rs](../../../bootstrap-languages/p-diff-sync/hc-dna/zomes/perspective_diff_sync_integrity/src/lib.rs): entry types (`PerspectiveDiffEntryReference`, `Snapshot`, `HashReference`, `LocalHashReference`, `LocalTimestampReference`, `Anchor`, `PrivateOnlineStatus`) and the `HashBroadcast` signal payload.
 - [Holochain service](../../agents/executor/services/holochain.md): the conductor this language runs on.
 
 </details>

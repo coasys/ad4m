@@ -1,6 +1,6 @@
 # Identity
 
-An agent's identity is a `did:key` DID that contains its Ed25519 public key. The executor keeps the secret key in its **wallet** and signs as the agent. Any executor verifies a signature from the DID alone. The agent's **agent profile** is published as an expression of the **agent language**.
+An agent's identity is a `did:key` DID that contains its Ed25519 public key. The executor keeps the secret key in its **wallet** and signs as the agent. Any executor verifies a signature from the DID alone. The agent's **agent profile** is published as an expression of the **agent language**. An agent's `did:key` can also be a device key of a person's `did:scid` identity.
 
 **Why:** A `did:key` DID needs no registry. The public key is inside the identifier, so verification needs no network call. Profiles go through a language, so their storage can change without a change to the executor.
 
@@ -10,6 +10,7 @@ An agent's identity is a `did:key` DID that contains its Ed25519 public key. The
 - [Wallet and keys](wallet-and-keys.md): the store of every agent's key, its file on disk, and how it is locked and unlocked.
 - [Signing and verification](signing-and-verification.md): how the executor signs expressions and messages as an agent and checks them; entanglement proofs.
 - [Agent profiles](profiles.md): the `Agent` record, where it is stored, how it is published and looked up.
+- [Person identity](person-identity.md): the `did:scid` key log a device key speaks for, how the executor checks it, joins an identity and replaces its main key.
 
 <details><summary>How it works</summary>
 
@@ -25,7 +26,7 @@ create_signed_expression(data, ctx) ──► Expression { author: DID, timestam
 agent language ◄── publish_agent_to_language(ctx) ── Agent { did, perspective, directMessageLanguage }
 ```
 
-1. `AgentContext::Main` uses the wallet key `main`. `AgentContext::Managed { did }` uses the key that `AgentService::wallet_key_for_did` finds for the DID. Each agent has one key, and its DID contains that key, so the code has no key rotation.
+1. `AgentContext::Main` uses the wallet key `main`. `AgentContext::Managed { did }` uses the key that `AgentService::wallet_key_for_did` finds for the DID. Each agent has one key, and its DID contains that key. `identity.rekey` gives the main agent a new key and so a new DID; the old key stays as `retired-main:<did>`. Managed agents have no re-key.
 2. An agent has two code shapes. `AgentService`, a global singleton, holds the main agent (`did`, `agent`, `signing_key_id`). A managed agent is a `users` row with a wallet key, reached through static functions in `agent/mod.rs` ([Managed agents](../executor/managed-agents.md)).
 3. Rust code passes the `AgentContext` explicitly. Language code signs as the agent of the call it runs in: each call carries its `AgentContext` as a call token (`CallAgent`), and the ops `agent_did` and the signing ops act as that token's agent. Code outside any call has no agent, and these ops refuse. The ops `agent_did_document` and `agent` return the main agent's DID document and profile ([agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs)).
 4. Entanglement proofs are for the main agent only ([Signing and verification](signing-and-verification.md)).
@@ -38,6 +39,7 @@ agent language ◄── publish_agent_to_language(ctx) ── Agent { did, pers
 - [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `AgentContext`, `AgentService`, `did_for_context`, `sign_for_context`, `create_signed_expression`.
 - [rust-executor/src/agent/signatures.rs](../../../rust-executor/src/agent/signatures.rs): verification.
 - [rust-executor/src/wallet.rs](../../../rust-executor/src/wallet.rs): `WalletBackend`, `LocalWallet`, `SharedWallet`.
+- [rust-executor/src/identity/](../../../rust-executor/src/identity): the person identity ([Person identity](person-identity.md)).
 - [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): the agent ops that language code calls.
 - [bootstrap-languages/agent-language/](../../../bootstrap-languages/agent-language): the default agent language (see [Languages](../../languages/README.md)).
 - [docs-src/pages/agents.mdx](../../../docs-src/pages/agents.mdx): user-facing description.

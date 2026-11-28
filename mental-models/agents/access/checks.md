@@ -8,17 +8,19 @@ An **access check** applies a session's grant to one call: a capability check pl
 
 <details><summary>How it works</summary>
 
-`HandlerMap::dispatch`: method (404) → params fit the contract (400) → the guard's capability, for `Cap`, `Executor` and `Owns` (403) → the guard's rule → the handler.
+`HandlerMap::dispatch`: method (404) → params fit the contract (400) → the guard's capability, for every guard but `Open` and `Operator` (403) → the guard's rule → for a `.local_only()` method, the operator on this machine only (403 `LOCAL_ONLY`) → the handler.
 
 | Guard | Rule after the capability |
 |---|---|
 | `Open` | none, and no capability: the handler decides (`runtime.info`, `user.logout`) |
 | `Operator` | the operator only, else 403; no capability check |
 | `Cap(cap)` | none: any session that holds `cap`; the handler acts as `ctx.acts_as()` |
+| `CapAnyPointer(cap)` | none, but `cap` needs to match on one pointer only; the handler narrows its answer to the pointers the session may read (`perspective.all`) |
 | `Executor(cap)` | the operator or a grant on the main agent, else 403 (calls on the executor itself) |
+| `UserOrOperator(cap)` | the operator or a session on a managed agent; a grant on the main agent gets 403 (`identity.cosignIncept`, `identity.publish`) |
 | `Owns { cap, id, owner }` | the resource that `id` names exists and the session's agent owns it (`guards::owns`), else 404; the operator reaches all |
 
-`Owner` kinds: `Perspective` (its `owners`; none: the main agent), `Task` (`tasks.agent_did`; none: the main agent), `Grant` (`agent.revokeToken`, `agent.removeApp`), `Request` (a pending capability request, `agent.permitCapability`). A method flagged `.or_null()` (`perspective.get`, `perspective.snapshot`) answers `null` in place of 404.
+`Owner` kinds: `Perspective` (its `owners`; none: the main agent), `Task` (`tasks.agent_did`; none: the main agent), `Grant` (`agent.revokeToken`, `agent.removeApp`), `Request` (a pending capability request, `agent.permitCapability`), `AiSession` (its `owner_did`; none: the main agent). A method flagged `.or_null()` (`perspective.get`, `perspective.snapshot`) answers `null` in place of 404.
 
 | Surface | Capability check | Ownership check | Denied answer |
 |---|---|---|---|
@@ -39,8 +41,8 @@ Ownership rule (`can_access_perspective_with_did`):
 
 <details><summary>Where in the code</summary>
 
-- [rust-executor/src/api/guards.rs](../../../rust-executor/src/api/guards.rs): `Guard`, `Owner`, `IdParam`, `owns`, `OPERATOR_ONLY`.
-- [rust-executor/src/api/ws_handler.rs](../../../rust-executor/src/api/ws_handler.rs): `HandlerMap::dispatch`, `admit`, `require_guards`, `shared_handler_map`.
+- [rust-executor/src/api/guards.rs](../../../rust-executor/src/api/guards.rs): `Guard`, `Owner`, `IdParam`, `owns`, `OPERATOR_ONLY`, `LOCAL_ONLY`.
+- [rust-executor/src/api/ws_handler.rs](../../../rust-executor/src/api/ws_handler.rs): `HandlerMap::dispatch`, `admit`, `admit_entry` (the local-only check), `local_only`, `require_guards`, `shared_handler_map`.
 - [rust-executor/src/api/perspectives_ws.rs](../../../rust-executor/src/api/perspectives_ws.rs): `get_perspective_with_access`, `guarded_perspective`, `check_credits`.
 - [rust-executor/src/helpers.rs](../../../rust-executor/src/helpers.rs): `can_access_perspective`, `can_access_perspective_with_did`.
 - [rust-executor/src/mcp/tools/mod.rs](../../../rust-executor/src/mcp/tools/mod.rs): `call_method`, `admit_method`, `get_readable_perspective`, `get_writable_perspective`, `method_error`.

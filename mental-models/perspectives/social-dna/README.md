@@ -21,7 +21,7 @@ Subject classes (the SDK's `Ad4mModel.register` / `registerAll` → `perspective
 
 Flows (`PerspectiveProxy.addFlow(name, flow)` in the SDK): the SDK writes `SHACLFlow.toLinks()` plus `ad4m://self → ad4m://has_flow` and `ad4m://flow_uri` itself through `linkMutations`. It sends only the difference to the stored definition. Readers use `parse_flow_from_links` → `SHACLFlow`.
 
-The executor also registers six **hard-wired classes** it needs itself (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) from JSON files in `hardwired_sdna/`, through `register_shapes` (`ensure_subject_classes` in `hardwired_class.rs`). The built-in abstract classes `TextContent`, `Mentioning` and `Container` come from the same directory, but no perspective stores them (`model_query/builtin_classes.rs`).
+The executor also registers six **hard-wired classes** it needs itself (`FlowInstance`, `FlowTransitionProposal`, `AutoProcessor`, `ProcessingClaim`, `InterpretationRun`, `InterpretationOverlay`) from JSON files in `hardwired_sdna/` (`ProcessingClaim`'s in `auto_processor/claim.rs`), through `register_shapes` (`ensure_subject_classes` in `hardwired_class.rs`). The built-in abstract classes `TextContent`, `Mentioning` and `Container` come from the same directory, but no perspective stores them (`model_query/builtin_classes.rs`).
 
 </details>
 

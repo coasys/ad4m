@@ -37,7 +37,7 @@ Terms: [Glossary](GLOSSARY.md).
 1. A caller opens one connection with a token. The executor turns it into a [session](agents/access/sessions.md) that acts as one agent within a grant.
 2. A write signs a [link](perspectives/links/link-expressions.md) as that agent and stores it in the perspective ([Link write path](perspectives/links/write-path.md)).
 3. In a [neighbourhood](perspectives/neighbourhoods/README.md), shared links go to the [link language](languages/link-languages/README.md), which carries them to the other members' executors. Their diffs come back the same way.
-4. Every change emits events and updates live queries on the caller's socket ([Events](agents/interfaces/events.md), [Live queries](perspectives/querying/live-queries.md)).
+4. Every change emits events and updates live queries on the sockets that watch them ([Events](agents/interfaces/events.md), [Live queries](perspectives/querying/live-queries.md)).
 
 Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain and billing as process-wide services ([Executor services](agents/executor/services/README.md)). Every perspective runs background loops: some wake on events, the others poll on fixed intervals ([Neighbourhood sync](perspectives/neighbourhoods/sync.md)). In the default network, languages, neighbourhoods and agent profiles are published to central HTTP services; link sync can also run peer-to-peer over Holochain ([Bootstrap languages](languages/runtime/bootstrap-languages.md)).
 
@@ -65,6 +65,7 @@ Beside agents, languages and perspectives, the executor holds AI, SFU, Holochain
       - [Wallet and keys](agents/identity/wallet-and-keys.md)
       - [Signing and verification](agents/identity/signing-and-verification.md)
       - [Agent profiles](agents/identity/profiles.md)
+      - [Person identity](agents/identity/person-identity.md)
     - [Executor](agents/executor/README.md)
       - [Executor startup](agents/executor/startup.md)
       - [Executor config](agents/executor/config.md)

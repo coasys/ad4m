@@ -1,6 +1,6 @@
 # Signing and verification
 
-The executor signs an **expression** as an agent. It hashes the data and the timestamp with SHA-256 and signs the hash with the agent's Ed25519 key. The result is `Expression { author, timestamp, data, proof }`. Any executor checks the **expression proof** from the author DID alone. An **entanglement proof** links the main agent's DID to another key, such as a device key or a Holochain agent key.
+The executor signs an **expression** as an agent. It hashes the data and the timestamp with SHA-256 and signs the hash with the agent's Ed25519 key. The result is `Expression { author, timestamp, data, proof }`. Any executor checks the **expression proof** of a `did:key` author from the author DID alone, and that of a `did:scid` author against the person's key log. An **entanglement proof** links the main agent's DID to another key, such as a device key or a Holochain agent key.
 
 **Why:** Every link and expression carries its author and a proof. Data that arrives through any language can therefore be checked where it arrives. The receiving executor computes the `valid` verdict itself and ignores the sender's.
 
@@ -20,9 +20,10 @@ The executor signs an **expression** as an agent. It hashes the data and the tim
    The hash covers `serde_json::to_vec(data)`. The ops that language code calls sort JSON keys first (`sort_json_value`). Rust callers hash their structs in field order, so the signed bytes follow the field order of Rust types such as `Link`.
 
 2. `sign_string_hex_for_context(text, ctx)` hashes the text with SHA-256, then signs. `agent.sign` uses it (`AgentSignature`), and so do entanglement proofs.
-3. `verify(expr)` rebuilds the hash, parses the DID as a key (`PatchedKeyPair::try_from`) and checks the signature. `verify_or_false` logs a malformed proof and answers `false`.
-4. RPC `agent.sign` signs as `ctx.acts_as()`. A user session signs as its managed agent, never as the main agent.
-5. Language code signs through the ops in `agent_extension.rs` ([Language isolates](../../languages/runtime/isolates.md)), as the agent of the call they run in (its call token, `CallAgent`). `agent_create_signed_expression_for_user(email, data)` refuses unless that call runs for that user. `agent_open_sealed` opens a sealed box sealed to that agent with the X25519 form of its Ed25519 secret, inside the executor, and returns only the plaintext.
+3. `verify(expr)` rebuilds the hash, parses the DID as a key (`PatchedKeyPair::try_from`) and checks the signature. `verify_or_false` logs a malformed proof and answers `false`. `verify_by(expr, did)` checks the signature under the `did:key` `did` instead of the author, once the caller knows that `did` signs for the author.
+4. `LanguageController::verify_expression_proof` picks the check by author: a `did:scid` author goes to `identity::verify_expression` (the key must be valid in the log up to the trusted seq; `proof.record` counts only from the agent language; with no identity module the answer is `false`), every other author to `verify` ([Person identity](person-identity.md)).
+5. RPC `agent.sign` signs as `ctx.acts_as()`. A user session signs as its managed agent, never as the main agent.
+6. Language code signs through the ops in `agent_extension.rs` ([Language isolates](../../languages/runtime/isolates.md)), as the agent of the call they run in (its call token, `CallAgent`). `agent_create_signed_expression_for_user(email, data)` refuses unless that call runs for that user. `agent_open_sealed` opens a sealed box sealed to that agent with the X25519 form of its Ed25519 secret, inside the executor, and returns only the plaintext.
 
 Entanglement proofs (`EntanglementProof`) are for the main agent only. The handlers refuse user sessions, and `sign_device_key` signs with the main key (`sign_string_hex`):
 
@@ -35,7 +36,8 @@ Entanglement proofs (`EntanglementProof`) are for the main agent only. The handl
 <details><summary>Where in the code</summary>
 
 - [rust-executor/src/agent/mod.rs](../../../rust-executor/src/agent/mod.rs): `create_signed_expression`, `sign_for_context`, `sign_string_hex_for_context`, `AgentSignature`.
-- [rust-executor/src/agent/signatures.rs](../../../rust-executor/src/agent/signatures.rs): `hash_data_and_timestamp`, `hash_message`, `verify`, `verify_or_false`, `verify_string_signed_by_did`.
+- [rust-executor/src/agent/signatures.rs](../../../rust-executor/src/agent/signatures.rs): `hash_data_and_timestamp`, `hash_message`, `verify`, `verify_by`, `verify_or_false`, `verify_string_signed_by_did`.
+- [rust-executor/src/languages/mod.rs](../../../rust-executor/src/languages/mod.rs): `LanguageController::verify_expression_proof`. [rust-executor/src/identity/resolver.rs](../../../rust-executor/src/identity/resolver.rs): `verify_expression`.
 - [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `agent_sign`, `agent_open_sealed`, `agent_create_signed_expression`, `agent_create_signed_expression_for_user`.
 - [rust-executor/src/agent/sealed_box.rs](../../../rust-executor/src/agent/sealed_box.rs): `SealedBox`, `open_sealed_for_context`.
 - [rust-executor/src/js_core/agent_extension.rs](../../../rust-executor/src/js_core/agent_extension.rs): `CallAgent`, `register_call_agent`, `agent_call_token`.

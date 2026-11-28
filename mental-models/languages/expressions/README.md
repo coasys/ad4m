@@ -15,9 +15,9 @@ An **expression** is data signed by an agent: `{author, timestamp, data, proof}`
 `expression.get(url)`:
 
 1. `LanguageController::parse_expr_url` splits the URL into language and expression address.
-2. `literal:` URLs decode in Rust. Other URLs go to the language: `expressionGet(address)` in its isolate. `get_expression` uses `execute_on_language`, so every read runs as the main agent.
+2. `literal:` URLs decode in Rust. Other URLs go to the language: `expressionGet(address)` in its isolate. `get_expression` calls the language with `AgentContext::main_agent()`, so every read runs as the main agent.
 3. If the language says `isImmutableExpression(address)`, the executor reads the SQLite `expression` cache first, and writes to it after a fetch.
-4. `verify_expression_proof` sorts the keys of `data`, checks the signature with `agent::signatures::verify`, and sets `proof.valid` / `proof.invalid`.
+4. `verify_expression_proof` sorts the keys of `data`, checks the signature with `agent::signatures::verify` (a `did:scid` author: `identity::verify_expression`, against the identity module's key-log cache), and sets `proof.valid` / `proof.invalid`.
 
 `expression.create(content, language)`:
 
