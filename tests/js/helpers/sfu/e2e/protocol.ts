@@ -45,11 +45,13 @@ export type Command =
 
 /** What arrives from one remote participant. */
 export interface Remote {
+  /** Audio frames received from this participant: a total that never falls, retired receivers' frames included. */
   audioFrames: number;
   /** Audio frames in the last second. */
   audioRecent: number;
   /** The tone this audio carries, or null for silence. */
   tone: number | null;
+  /** Video frames received from this participant: a total that never falls, retired receivers' frames included. */
   videoFrames: number;
   videoRecent: number;
   width: number;

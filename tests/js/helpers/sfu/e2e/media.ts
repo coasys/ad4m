@@ -270,6 +270,10 @@ export interface Heard {
 export class Hearing {
   /** One receiver per track id, kept across snapshots so it collects frames. */
   private receivers = new Map<string, Receiver>();
+  /** Who each receiver's track last belonged to, to credit its frames when the track goes. */
+  private owners = new Map<string, Heard>();
+  /** Frames of receivers whose track left, by the participant that held it. */
+  private retired: { owner: Heard; audio: number; video: number }[] = [];
 
   /** Attach a receiver to every track of every participant that has none yet. */
   attach(participants: readonly Heard[]): void {
@@ -282,7 +286,11 @@ export class Hearing {
 
   /**
    * Per participant — by DID unless `key` says otherwise — the frames
-   * arriving, the tone their audio carries, their video's size.
+   * arriving, the tone their audio carries, their video's size. The frame
+   * totals (`audioFrames`, `videoFrames`) never fall: a retired receiver's
+   * frames stay in the total of the participant that held its track, so a
+   * replaced track is not read as media that stopped. `audioRecent`,
+   * `videoRecent`, the tone and the size come from the held tracks only.
    */
   remotes(participants: readonly Heard[], tones: number[], key: (p: Heard) => string = (p) => p.agentDid): Record<string, Remote> {
     this.attach(participants);
@@ -292,6 +300,7 @@ export class Hearing {
       const remote = (remotes[key(participant)] ??= { audioFrames: 0, audioRecent: 0, tone: null, videoFrames: 0, videoRecent: 0, width: 0, height: 0 });
       for (const track of participant.stream.getTracks()) {
         held.add(track.id);
+        this.owners.set(track.id, participant);
         const receiver = this.receivers.get(track.id)!;
         if (track.kind === "audio") {
           remote.audioFrames += receiver.frames;
@@ -311,7 +320,16 @@ export class Hearing {
     for (const [id, receiver] of this.receivers) {
       if (held.has(id)) continue;
       receiver.stop();
+      const owner = this.owners.get(id)!;
+      this.retired.push({ owner, audio: receiver.track.kind === "audio" ? receiver.frames : 0, video: receiver.track.kind === "audio" ? 0 : receiver.frames });
       this.receivers.delete(id);
+      this.owners.delete(id);
+    }
+    for (const { owner, audio, video } of this.retired) {
+      const remote = remotes[key(owner)];
+      if (!remote) continue;
+      remote.audioFrames += audio;
+      remote.videoFrames += video;
     }
     return remotes;
   }

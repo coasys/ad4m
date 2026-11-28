@@ -22,9 +22,13 @@
  *    `participant-left` events a session fired, so its growth over the run
  *    is how many peers visibly left (a rebuild fires one per roster member).
  *
- * A sample that failed is missing evidence, never a pass. A sample is stamped
- * when its snapshots came back, so a slow collection never passes for an
- * early one. `stop()` keeps sampling until every ended window shows its
+ * A sample that failed is missing evidence, never a pass. A sample records
+ * when its collection started (`from`) and when its snapshots came back (`t`):
+ * participants answer in parallel, so the batch holds observations anywhere
+ * between the two. A baseline for recovery must have started at or after the
+ * window's end, and one for growth must have come back GROWTH_MS before the
+ * current collection started, so every counter pair spans at least
+ * GROWTH_MS. `stop()` keeps sampling until every ended window shows its
  * recovery (or its bound has passed), then judges. `abort()` stops at once
  * without judging: a row calls it in `finally`, so a failed step ends the
  * sampling too.
@@ -56,6 +60,8 @@ export interface FaultWindow {
 }
 
 interface Sample {
+  /** ms epoch when the collection started. */
+  from: number;
   /** ms epoch when the snapshots came back. */
   t: number;
   /** null: the snapshot failed, so this moment has no evidence. */
@@ -78,9 +84,10 @@ export class RunChecks {
 
   /** Start sampling. Call once everyone is joined and media flows. */
   async start(): Promise<void> {
+    const from = Date.now();
     const snaps = await this.call.snapshots();
     for (const [name, snap] of snaps) this.departuresAtStart.set(name, snap.departures);
-    this.samples.push({ t: Date.now(), snaps });
+    this.samples.push({ from, t: Date.now(), snaps });
     const tick = () => {
       this.timer = null;
       if (this.stopped) return;
@@ -92,13 +99,14 @@ export class RunChecks {
     this.timer = setTimeout(tick, SAMPLE_MS);
   }
 
-  /** Take one sample, stamped when its snapshots are in. */
+  /** Take one sample, stamped when its collection started and when its snapshots are in. */
   private async take(): Promise<Sample> {
+    const from = Date.now();
     try {
       const snaps = await this.call.snapshots();
-      return { t: Date.now(), snaps };
+      return { from, t: Date.now(), snaps };
     } catch (error) {
-      return { t: Date.now(), snaps: null, error: error instanceof Error ? error.message : String(error) };
+      return { from, t: Date.now(), snaps: null, error: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -166,14 +174,14 @@ export class RunChecks {
   }
 
   /**
-   * What is wrong with media at `s`, against the latest good sample at least GROWTH_MS older and not before `since`; null: no such sample yet.
+   * What is wrong with media at `s`, against the latest good sample that came back GROWTH_MS before `s` started its collection and started at or after `since`; null: no such sample yet.
    * Who is judged: the participants `s` holds that `only` allows (all of them when `only` is absent).
    */
   private mediaProblems(good: GoodSample[], s: GoodSample, since: number, only?: Set<string>): string[] | null {
-    const base = [...good].reverse().find((b) => b.t <= s.t - GROWTH_MS && b.t >= since);
+    const base = [...good].reverse().find((b) => b.t <= s.from - GROWTH_MS && b.from >= since);
     if (!base) return null;
     const among = [...s.snaps.keys()].filter((name) => !only || only.has(name));
-    return all(this.call.hearsEveryone(among), this.call.seesEveryone(undefined, among), this.call.framesGrow(base.snaps, s.t - base.t, among))(s.snaps, true);
+    return all(this.call.hearsEveryone(among), this.call.seesEveryone(undefined, among), this.call.framesGrow(base.snaps, s.from - base.t, among))(s.snaps, true);
   }
 
   /** The first sample after `w` ended with media fresh on every pair, measured after the end; else the last problems seen. */
