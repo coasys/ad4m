@@ -24,6 +24,7 @@ pub enum Capability {
     PerspectiveSync,
     PerspectiveRender,
     PerspectiveCurrentRevision,
+    PerspectiveMissing,
     PerspectiveQuery,
     PeersLocal,
     PeersRemote,
@@ -55,13 +56,14 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in declaration order.
-    pub const ALL: [Capability; 31] = [
+    pub const ALL: [Capability; 32] = [
         Capability::ExpressionCreate,
         Capability::ExpressionGet,
         Capability::PerspectiveCommit,
         Capability::PerspectiveSync,
         Capability::PerspectiveRender,
         Capability::PerspectiveCurrentRevision,
+        Capability::PerspectiveMissing,
         Capability::PerspectiveQuery,
         Capability::PeersLocal,
         Capability::PeersRemote,
@@ -98,6 +100,7 @@ impl Capability {
             Capability::PerspectiveSync => "perspective-sync",
             Capability::PerspectiveRender => "perspective-render",
             Capability::PerspectiveCurrentRevision => "perspective-current-revision",
+            Capability::PerspectiveMissing => "perspective-missing",
             Capability::PerspectiveQuery => "perspective-query",
             Capability::PeersLocal => "peers-local",
             Capability::PeersRemote => "peers-remote",
@@ -137,6 +140,7 @@ impl Capability {
             Capability::PerspectiveSync => "perspectiveSyncSync",
             Capability::PerspectiveRender => "perspectiveSyncRender",
             Capability::PerspectiveCurrentRevision => "perspectiveSyncCurrentRevision",
+            Capability::PerspectiveMissing => "perspectiveSyncMissing",
             Capability::PerspectiveQuery => "perspectiveQueryRun",
             Capability::PeersLocal => "peersSetLocal",
             Capability::PeersRemote => "peersRemote",
@@ -199,6 +203,7 @@ impl Capability {
             "perspective-sync" => Some(Capability::PerspectiveSync),
             "perspective-render" => Some(Capability::PerspectiveRender),
             "perspective-current-revision" => Some(Capability::PerspectiveCurrentRevision),
+            "perspective-missing" => Some(Capability::PerspectiveMissing),
             "perspective-query" => Some(Capability::PerspectiveQuery),
             "peers-local" => Some(Capability::PeersLocal),
             "peers-remote" => Some(Capability::PeersRemote),

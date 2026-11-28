@@ -14,7 +14,7 @@
 
 import { defineLanguage, hash } from "@coasys/ad4m-ldk";
 
-import type { PerspectiveDiff } from "./src/types.js";
+import type { LinkExpression, PerspectiveDiff } from "./src/types.js";
 import * as store from "./src/store.js";
 import * as api from "./src/api.js";
 import * as auth from "./src/auth.js";
@@ -504,6 +504,10 @@ const language = defineLanguage({
         async currentRevision() {
             return syncModule.currentRevision();
         },
+
+        async missing(links: LinkExpression[]) {
+            return syncModule.missing(links);
+        },
     },
 
     // -----------------------------------------------------------------------
@@ -578,6 +582,7 @@ export const {
     perspectiveSyncSync,
     perspectiveSyncRender,
     perspectiveSyncCurrentRevision,
+    perspectiveSyncMissing,
     perspectiveQuerySupportedKinds,
     perspectiveQueryRun,
     peersSetLocal,

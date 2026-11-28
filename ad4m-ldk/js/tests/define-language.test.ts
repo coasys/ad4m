@@ -41,11 +41,38 @@ test("defineLanguage: commit + sync + peers → flat exports", () => {
     assert.equal(typeof lang.perspectiveSyncSync, "function");
     assert.equal(typeof lang.perspectiveSyncRender, "function");
     assert.equal(typeof lang.perspectiveSyncCurrentRevision, "function");
+    // `missing` is optional: not defined, not exported (the executor detects
+    // the capability by the export).
+    assert.equal(lang.perspectiveSyncMissing, undefined);
     assert.equal(typeof lang.peersSetLocal, "function");
     assert.equal(typeof lang.peersRemote, "function");
 
     return Promise.resolve(lang.perspectiveCommit!({ additions: [], removals: [] }))
         .then(() => assert.deepEqual(committed, { additions: [], removals: [] }));
+});
+
+test("defineLanguage: sync.missing → perspectiveSyncMissing, bound to its object", async () => {
+    const link = (target: string) => ({
+        author: "did:key:zAlice",
+        timestamp: "2026-11-27T00:00:00.000Z",
+        data: { source: "ad4m://self", predicate: "", target },
+        proof: { key: "", signature: "" },
+    });
+    const lang = defineLanguage({
+        name: "pm",
+        async init() {},
+        sync: {
+            held: new Set(["a"]),
+            async sync() { return { additions: [], removals: [] }; },
+            async render() { return { links: [] }; },
+            currentRevision() { return null; },
+            async missing(links) {
+                return links.filter((l) => !this.held.has(l.data.target));
+            },
+        } as any,
+    });
+    const missing = await lang.perspectiveSyncMissing!([link("a"), link("b")] as any);
+    assert.deepEqual(missing?.map((l) => l.data.target), ["b"]);
 });
 
 test("defineLanguage: expression capability fields", () => {

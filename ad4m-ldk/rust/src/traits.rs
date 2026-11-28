@@ -212,6 +212,18 @@ pub trait PerspectiveSyncCapability: Language {
     fn perspective_sync_current_revision(&mut self) -> LanguageResult<Option<String>>;
 }
 
+/// `perspective-missing` capability (optional, beside `perspective-sync`):
+/// of `links`, the ones the remote lacks, compared by author, timestamp,
+/// source, predicate (`""` = none) and target. `None` when the language does
+/// not know what the remote holds. When a language exports it, the
+/// executor's fallback sync asks this in batches instead of rendering.
+pub trait PerspectiveMissingCapability: Language {
+    fn perspective_sync_missing(
+        &mut self,
+        links: Vec<LinkExpression>,
+    ) -> LanguageResult<Option<Vec<LinkExpression>>>;
+}
+
 /// `perspective-query` capability — structured reads.
 pub trait PerspectiveQueryCapability: Language {
     fn perspective_query_supported_kinds(&self) -> Vec<String>;

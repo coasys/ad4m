@@ -74,6 +74,26 @@ export async function perspectiveSyncCurrentRevision() {
     return revision.toString();
 }
 
+// The links of `asked` this store lacks. Never null: this store is the room.
+// Compares by the capability's identity, where "" and no predicate are the
+// same: the executor reads an empty predicate back as none. One Set of the
+// whole store per call: a linear scan, not an index.
+export async function perspectiveSyncMissing(asked) {
+    const held = new Set(links.map(memberKey));
+    return asked.filter(function(l) { return !held.has(memberKey(l)); });
+}
+
+function memberKey(l) {
+    const data = l.data || {};
+    return JSON.stringify([
+        l.author || "",
+        l.timestamp || "",
+        data.source || "",
+        data.predicate || "",
+        data.target || "",
+    ]);
+}
+
 // -- commit capability --
 
 function linkKey(l) {

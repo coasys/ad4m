@@ -278,6 +278,22 @@ macro_rules! __ad4m_cap {
         }
     };
 
+    (perspective_missing, $lang:ty) => {
+        #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveSyncMissing")]
+        pub fn __ad4m_perspective_sync_missing(
+            links: ::wasm_bindgen::JsValue,
+        ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
+            let links: ::std::vec::Vec<$crate::types::LinkExpression> =
+                ::serde_wasm_bindgen::from_value(links)
+                    .map_err($crate::errors::LanguageError::from)?;
+            let m = __ad4m_with("perspectiveSyncMissing", |l| <$lang as $crate::traits::PerspectiveMissingCapability>::perspective_sync_missing(l, links))??;
+            Ok(match m {
+                Some(v) => $crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?,
+                None => ::wasm_bindgen::JsValue::NULL,
+            })
+        }
+    };
+
     (perspective_query, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveQuerySupportedKinds")]
         pub fn __ad4m_perspective_query_supported_kinds() -> ::wasm_bindgen::JsValue {

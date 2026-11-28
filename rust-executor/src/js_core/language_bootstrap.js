@@ -422,6 +422,7 @@ async function initLanguage(contextJson) {
         "perspectiveCommit",
         // Perspective-sync
         "perspectiveSyncSync", "perspectiveSyncRender", "perspectiveSyncCurrentRevision",
+        "perspectiveSyncMissing",
         // Perspective-query
         "perspectiveQuerySupportedKinds", "perspectiveQueryRun",
         // Peers

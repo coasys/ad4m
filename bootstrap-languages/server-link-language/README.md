@@ -207,7 +207,8 @@ costs that one link, not the rest of its batch or the other held links.
   page. Nothing is removed after the last page: a fresh store held nothing
   the server does not have. Once per start, a store at the room's head that
   does not hash to the room's revision (the XOR of the links' `link_hash`)
-  loads the same paged render again; until then `render()` answers null.
+  loads the same paged render again; until then `render()` and
+  `missing(links)` answer null.
 - The stored `render/progress` is what says a fresh member's render is
   still needed. `init()` stores it before authenticating, so a render that timed out, or
   never ran because authentication failed first, is resumed by catch-up (the

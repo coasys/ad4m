@@ -138,14 +138,24 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   store holds only the pages and its own commits, which the server has, in
   the snapshot or the tail. A resumed render keeps its `upto`, so the tail
   needs the log after it, which the server keeps.
-- **`render()` answers only a store that is the room.** The link server's
+- **`render()` and `missing(links)` answer only a store that is the room.** The link server's
   revision is the XOR of the active links' `link_hash`, and a member computes
   each `link_hash` (`wireLinkHash`). So a store with its held ops applied
-  (`storeRevision`, src/sync.ts) must hash to the revision stored with the
-  cursor. `render()` returns null (unknown) while a render is stored or when
+  (`linksRevision`, src/store.ts) must hash to the revision stored with the
+  cursor. `render()` and `missing()` return null (unknown) while a render is stored or when
   the store does not hash to it: the executor's fallback sync pushes every
-  shared link `render()` lacks, so a short store made it push most of the
-  room again (12,303 of 12,803 links on staging, 2026-11-10). `currentRevision()` stays the stored revision, never null:
+  shared link the language lacks, so a short store made it push most of the
+  room again (12,303 of 12,803 links on staging, 2026-11-10).
+  The store keeps that XOR as it changes (`links-xor`: `putLink` of a link it
+  lacked, `removeLink` of one it held; a store without the key computes it
+  once from `allLinks()`), and the held ops in memory. With no link held, the
+  check lists no keys. While any link is held, `linksRevision` reads the wire
+  hashes of all stored links from `allLinks()` once and keeps them until the
+  held set is empty again. The executor asks `missing` (export
+  `perspectiveSyncMissing`) in batches of 500 links instead of reading
+  `render()`; it answers the links of the batch the store lacks with one
+  `hasLink` lookup each, or two for a link whose predicate is empty or absent:
+  such a link matches the same link stored with the other form. `currentRevision()` stays the stored revision, never null:
   the executor reads a null revision as "nothing committed yet".
   `healIfShort`: once per start, after a catch-up that reached the room's
   head, a store that does not hash to the room's revision stores a render

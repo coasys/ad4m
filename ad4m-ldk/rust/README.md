@@ -100,6 +100,7 @@ thinks your Language can do.
 
 - **Capability traits** (`Language`, `ExpressionCapability`,
   `PerspectiveCommitCapability`, `PerspectiveSyncCapability`,
+  `PerspectiveMissingCapability`,
   `PerspectiveQueryCapability`, `PeersCapability`,
   `TelepresenceCapability`, `LanguageSourceCapability`,
   `MountCapability`, `HolochainSignalHandler`). Implement only the ones

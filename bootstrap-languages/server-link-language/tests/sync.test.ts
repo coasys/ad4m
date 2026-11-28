@@ -1397,3 +1397,71 @@ describe("sync: an incomplete mirror is not presented as the server's state", ()
         assert.equal(syncModule.render(), null, "still short of the room's revision: unknown");
     });
 });
+
+// ---------------------------------------------------------------------------
+// missing(): which of these links does the room lack?
+// ---------------------------------------------------------------------------
+
+describe("sync: missing() answers the links the store lacks, only when the store is the room", () => {
+    const room = [1, 2, 3].map((i) => makeLink({ source: `room-${i}` }));
+    const absent = makeLink({ source: "absent" });
+
+    /** The store is the room: `links` stored, the revision theirs. */
+    function roomStore(links: LinkExpression[]): CountingStorage {
+        setup(new MockTransport());
+        const storage = new CountingStorage();
+        initAdapters({ storage });
+        for (const link of links) store.putLink(link);
+        store.setSequence(9);
+        store.setRevision(roomRevision(links));
+        return storage;
+    }
+
+    class CountingStorage extends MockStorage {
+        listings = 0;
+        listKeys(prefix?: string): string[] {
+            this.listings++;
+            return super.listKeys(prefix);
+        }
+    }
+
+    it("answers the links the store lacks, and lists no keys to answer", () => {
+        const storage = roomStore(room);
+        assert.deepEqual(syncModule.missing([room[0], absent, room[2]]), [absent]);
+
+        storage.listings = 0;
+        for (let i = 0; i < 3; i++) {
+            assert.deepEqual(syncModule.missing([...room, absent]), [absent]);
+        }
+        assert.deepEqual(syncModule.missing([]), []);
+        assert.equal(storage.listings, 0, "a call reads the links it is asked about, not the store");
+    });
+
+    it("is unknown (null) while a render is stored, and when the store is short or has no revision", () => {
+        roomStore(room);
+        store.setRenderProgress({ upto: null, next: null, page: 0 });
+        assert.equal(syncModule.missing([absent]), null, "bootstrapping");
+        store.clearRender();
+        assert.deepEqual(syncModule.missing([absent]), [absent]);
+
+        store.setRevision(roomRevision([...room, absent]));
+        assert.equal(syncModule.missing([absent]), null, "the store is short of the room");
+
+        setup(new MockTransport());
+        assert.equal(syncModule.missing([absent]), null, "no revision yet");
+    });
+
+    it("matches a link with an empty predicate to the same link without one, both ways", () => {
+        const empty = makeLink({ source: "empty", predicate: "" });
+        const none = makeLink({ source: "none", predicate: undefined });
+        roomStore([empty, none]);
+
+        const asNone = { ...empty, data: { ...empty.data, predicate: undefined } };
+        const asNull = { ...empty, data: { ...empty.data, predicate: null as unknown as string } };
+        const asEmpty = { ...none, data: { ...none.data, predicate: "" } };
+        assert.deepEqual(syncModule.missing([empty, none, asNone, asNull, asEmpty]), []);
+
+        const other = makeLink({ source: "other", predicate: "" });
+        assert.deepEqual(syncModule.missing([other]), [other], "a link the store lacks under either form");
+    });
+});
