@@ -46,6 +46,14 @@ use std::collections::HashMap;
 /// The agent of one call into a language. Only `agent_call_token` makes one.
 pub struct CallAgent(AgentContext);
 
+impl CallAgent {
+    /// The agent this call acts as. For ops outside this extension that route by the caller
+    /// (the `HOLOCHAIN_SERVICE` ops pick the caller's cell, #1775).
+    pub(crate) fn agent(&self) -> &AgentContext {
+        &self.0
+    }
+}
+
 // SAFETY: holds no garbage-collected references, so there is nothing to trace.
 unsafe impl deno_core::GarbageCollected for CallAgent {
     fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {}
