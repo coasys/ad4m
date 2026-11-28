@@ -154,6 +154,20 @@ pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     }
 }
 
+/// [`values_or_str_filter`] for a variable no other pattern of the group binds: when it falls
+/// back to the `STR` filter, a sub-select binds `?{var}` first, to each subject of the store
+/// whose text is in `ids` (a scan, once per node, as the fallback already is). Without it
+/// the filter tests an unbound variable and the group has no rows. It binds subjects only: an
+/// id the store holds only as a link's target stays out (the legacy ids it is for are records,
+/// with links of their own).
+pub(super) fn binding_values_or_str_filter(var: &str, ids: &[String]) -> String {
+    let filter = values_or_str_filter(var, ids);
+    if ids.iter().all(|id| emittable_iri(id)) {
+        return filter;
+    }
+    format!("{{ SELECT DISTINCT ?{var} WHERE {{ ?{var} ?_{var}Bind ?_{var}Any . {filter} }} }}")
+}
+
 /// One SPARQL line (with its newline) keeping `?predicate` to `predicates`,
 /// for a read that binds `?source ?predicate ?target`. Empty for no predicates.
 ///

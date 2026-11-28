@@ -31,7 +31,7 @@
 //! step 1 reads is the value the record's hydrated row carries, whichever way
 //! its class answers, so the order is the one hydrating every row would give.
 //! Creation time (`timestamp`, `createdAt`, and the default order) is the
-//! earliest link hydration reads ([`SortKey::CreatedAt`]), not the conformance
+//! earliest link hydration reads (`sparql_builder::created_at_query`), not the conformance
 //! link a paged single-class read sorts on.
 //!
 //! Membership comes from step 1, as on a paged single-class read: under an
@@ -61,7 +61,7 @@ use super::query::{execute_model_query_inner, select_ids, walk_order, with_walk}
 use super::relations::{choose, SUBJECT_CLASSES_KEY, SUBJECT_CLASS_KEY};
 use super::types::{
     ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput, Scope,
-    ShapeResolver, SortKey, WhereCondition,
+    ShapeResolver, WhereCondition,
 };
 use crate::perspectives::shacl_parser::class_name_of;
 use crate::perspectives::sparql_store::{EvalStop, SparqlStore};
@@ -176,7 +176,7 @@ fn subject_classes_value(classified: Option<&Vec<String>>, chosen: &str) -> Valu
 /// Where a class's value for one order key comes from when the class's id
 /// phase answers it, so the record is not hydrated to be sorted.
 enum KeySource {
-    /// Creation time: `?_first_ts` of [`SortKey::CreatedAt`], the earliest
+    /// Creation time: `?_first_ts` of `sparql_builder::created_at_query`, the earliest
     /// link hydration reads, so the `timestamp` the class's rows carry.
     CreatedAt,
     /// A scalar property, as `?_sort_str`: the lexical value `parse_literal`
@@ -249,17 +249,17 @@ async fn members_from_ids(
         KeySource::Property(p) => Some(p),
         _ => None,
     });
-    let sort_key = match predicates.next() {
+    let property = match predicates.next() {
         Some(p) if predicates.all(|q| q == p) => {
             if sources.iter().any(|s| matches!(s, KeySource::CreatedAt)) {
                 return Ok(None);
             }
-            SortKey::Property(p.clone())
+            Some(p.as_str())
         }
         Some(_) => return Ok(None),
-        None => SortKey::CreatedAt,
+        None => None,
     };
-    let Some(rows) = select_ids(stop, store, shape, select, resolver, sort_key).await? else {
+    let Some(rows) = select_ids(stop, store, shape, select, resolver, property).await? else {
         return Ok(None);
     };
     Ok(Some(

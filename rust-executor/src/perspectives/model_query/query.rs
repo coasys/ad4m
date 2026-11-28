@@ -19,9 +19,9 @@ use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
-    ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, created_at_query, ids_query,
+    level_limits, link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter,
+    LinkGuard, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -464,7 +464,20 @@ pub async fn execute_model_query_stopped(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await
+    // `query_timing` (see `SparqlStore::query`): the input is formatted only when it is logged.
+    let started =
+        log::log_enabled!(target: "query_timing", log::Level::Debug).then(std::time::Instant::now);
+    let result = execute_model_query_inner(stop, store, shape, query_input, resolver, 0).await;
+    if let Some(started) = started {
+        log::debug!(
+            target: "query_timing",
+            "model {}ms class={} query={}",
+            started.elapsed().as_millis(),
+            shape.target_class,
+            crate::perspectives::sparql_store::one_line(&format!("{query_input:?}"))
+        );
+    }
+    result
 }
 
 /// Refuse a scope that combines options with no single meaning.
@@ -531,10 +544,9 @@ fn refuse_unanswerable_scope(query_input: &ModelQueryInput) -> Result<(), Error>
 
 /// The id phase of [`execute_model_query_inner`] on its own: every record in
 /// scope that passes `where`, as the rows of the two-phase plan's first query
-/// with no window — `?source` and the binding `sort_key` sorts on
-/// (`?_first_ts` for [`SortKey::Timestamp`] and [`SortKey::CreatedAt`],
-/// `?_sort_num` / `?_sort_str` for
-/// [`SortKey::Property`]). Nothing is hydrated. A union over several classes
+/// with no window — `?source` and the binding the order sorts on: `?_sort_num` /
+/// `?_sort_str` for the value of `property`, or `?_first_ts`, the creation time, with
+/// none (see [`created_at_query`]). Nothing is hydrated. A union over several classes
 /// pages on these and hydrates only its page.
 ///
 /// `None` when the store cannot answer the read on its own: a `where` that is
@@ -546,7 +558,7 @@ pub(super) async fn select_ids(
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
-    sort_key: SortKey,
+    property: Option<&str>,
 ) -> Result<Option<Vec<Value>>, Error> {
     refuse_unanswerable_scope(query_input)?;
     let walked_input = with_walk(stop, store, query_input)?;
@@ -558,8 +570,30 @@ pub(super) async fn select_ids(
     {
         return Ok(None);
     }
+    let Some(predicate) = property else {
+        // The kind's ids first, then their creation times (see `ids_query_of`).
+        let ids = match ids_query(shape, query_input, Some(resolver)) {
+            Some(ids_query) => {
+                let rows: Vec<Value> =
+                    serde_json::from_str(&store.query_async(stop, &ids_query).await?)?;
+                let ids: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| r["source"].as_str().map(str::to_string))
+                    .collect();
+                if ids.is_empty() {
+                    return Ok(Some(vec![]));
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+        let sparql = created_at_query(shape, query_input, Some(resolver), ids.as_deref());
+        return Ok(Some(serde_json::from_str(
+            &store.query_async(stop, &sparql).await?,
+        )?));
+    };
     let pagination = SparqlPagination {
-        sort_key,
+        sort_key: SortKey::Property(predicate.to_string()),
         direction: OrderDirection::ASC,
         offset: None,
         limit: None,
@@ -934,20 +968,14 @@ pub(super) async fn execute_model_query_inner(
             if ordered_ids.is_empty() {
                 vec![]
             } else {
-                let source_ids: Vec<String> = ordered_ids
-                    .iter()
-                    .filter_map(|s| validate_iri(s).ok().map(|s| s.to_string()))
-                    .collect();
-
-                if source_ids.is_empty() {
-                    vec![]
-                } else {
-                    let source_constraint = values_or_str_filter("source", &source_ids);
-                    let local_status = local_status_filter(shape);
-                    let link_status = link_status_filter(query_input.link_status.as_ref());
-                    let proof_valid = proof_valid_filter(query_input.include_unverified);
-                    let property_sparql = format!(
-                        r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+                // Every id the store answered, whatever its text: an id that cannot sit in `<…>`
+                // (a space, a quote) is matched by `STR`, escaped.
+                let source_constraint = values_or_str_filter("source", &ordered_ids);
+                let local_status = local_status_filter(shape);
+                let link_status = link_status_filter(query_input.link_status.as_ref());
+                let proof_valid = proof_valid_filter(query_input.include_unverified);
+                let property_sparql = format!(
+                    r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
@@ -955,10 +983,9 @@ pub(super) async fn execute_model_query_inner(
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
 {link_status}{proof_valid}{local_status}}}"#
-                    );
-                    let result_json = store.query_async(stop, &property_sparql).await?;
-                    serde_json::from_str(&result_json)?
-                }
+                );
+                let result_json = store.query_async(stop, &property_sparql).await?;
+                serde_json::from_str(&result_json)?
             }
         }
     };

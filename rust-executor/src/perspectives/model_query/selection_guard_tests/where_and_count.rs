@@ -513,19 +513,15 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
     }
 
     // Hydration folds identical rows, so the instances above cannot show the
-    // fan-out. The single plan's rows can: one per link (two each on `type`,
-    // `name` and `members`), not one per combination of passing links
-    // (2 x 2 x 2 per link without `DISTINCT`).
+    // fan-out. The id query's rows can: one id, not one per combination of passing links
+    // (2 x 2 x 2 without `DISTINCT`).
     let (_, shape) =
         super::super::test_helpers::StaticShapeResolver::from_json("Grant", SG_SHAPE_JSON).unwrap();
     let query: ModelQueryInput =
         serde_json::from_value(json!({ "where": { "name": "x", "members": "sg://a/carol" } }))
             .unwrap();
-    let super::super::types::InstanceQueryPlan::Single(sparql) =
-        super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None)
-    else {
-        panic!("expected the single plan");
-    };
+    let sparql = super::super::sparql_builder::ids_query(&shape, &query, None)
+        .expect("a shape with a membership check asks for its ids");
     let rows: Vec<Value> = serde_json::from_str(
         &store
             .query(
@@ -535,5 +531,5 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(rows.len(), 6, "one row per link: {rows:?}");
+    assert_eq!(rows.len(), 1, "one row per instance: {rows:?}");
 }

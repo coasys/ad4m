@@ -302,6 +302,40 @@ pub(crate) async fn query_gate(
     gate
 }
 
+/// `text` on one line for the `query_timing` log: a line break is written `\n` or `\r`, so
+/// nothing else changes (a `#` comment keeps its end, a literal keeps its spaces). Cut at
+/// 4,000 characters, on a character boundary.
+pub(crate) fn one_line(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars().take(4000) {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Runs `run`, and logs its time and `text` at `debug` for the target `query_timing`, error or
+/// not: `RUST_LOG=query_timing=debug`, or `log_config: {"query_timing": "debug"}`. The text is
+/// formatted only when the log is on. Every SPARQL evaluation of the store goes through it.
+fn timed<T>(text: &str, run: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    let started =
+        log::log_enabled!(target: "query_timing", log::Level::Debug).then(std::time::Instant::now);
+    let result = run();
+    if let Some(started) = started {
+        log::debug!(
+            target: "query_timing",
+            "store {}ms len={} q={}",
+            started.elapsed().as_millis(),
+            text.len(),
+            one_line(text)
+        );
+    }
+    result
+}
+
 /// The counter the tests use to prove a stopped evaluation actually ended —
 /// incremented while an eval runs, decremented when it ends.
 #[cfg(test)]
@@ -2313,8 +2347,16 @@ impl SparqlStore {
     /// ?author ?timestamp` (and optionally `?wireTarget ?proofKey ?proofSig
     /// ?proofValid ?status`) and decode each solution into a link, the same way
     /// [`Self::get_all_links`] does. Solutions that do not decode to a link
-    /// (non-IRI source, blank-node target, ...) are skipped.
+    /// (non-IRI source, blank-node target, ...) are skipped. Timed (see [`timed`]).
     pub(crate) fn query_decorated_links(
+        &self,
+        stop: &EvalStop,
+        query: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        timed(query, || self.decorated_links_of(stop, query))
+    }
+
+    fn decorated_links_of(
         &self,
         stop: &EvalStop,
         query: &str,
@@ -2926,7 +2968,19 @@ impl SparqlStore {
         self.query_internal(stop, query_string, false)
     }
 
+    /// [`Self::run_query`], timed (see [`timed`]).
     fn query_internal(
+        &self,
+        stop: &EvalStop,
+        query_string: &str,
+        hydrate_target_vars: bool,
+    ) -> Result<String, Error> {
+        timed(query_string, || {
+            self.run_query(stop, query_string, hydrate_target_vars)
+        })
+    }
+
+    fn run_query(
         &self,
         stop: &EvalStop,
         query_string: &str,
@@ -3467,6 +3521,18 @@ impl SparqlStore {
 mod tests {
     use super::*;
     use crate::agent::signatures::TestSigner;
+
+    /// The timing log keeps the text's meaning: spaces stay, a line break is escaped (so a `#`
+    /// comment still ends where it did), and the cut falls on a character boundary.
+    #[test]
+    fn the_timing_log_escapes_line_breaks_and_keeps_everything_else() {
+        assert_eq!(
+            one_line("SELECT \"a  b\" # note\r\n?x\n"),
+            "SELECT \"a  b\" # note\\r\\n?x\\n"
+        );
+        let wide = "\u{e9}".repeat(5000);
+        assert_eq!(one_line(&wide).chars().count(), 4000);
+    }
 
     /// Every status reads back as itself; no annotation reads as `None`.
     #[test]

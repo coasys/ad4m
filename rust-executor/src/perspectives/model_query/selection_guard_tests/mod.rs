@@ -23,6 +23,7 @@
 //! | `walks.rs` | transitive projections and scopes, walked one guarded step at a time; the guard's cost |
 
 mod link_status;
+mod plan_cost;
 mod walks;
 mod where_and_count;
 

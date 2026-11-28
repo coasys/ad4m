@@ -834,12 +834,6 @@ pub(super) struct SparqlPagination {
 pub(super) enum SortKey {
     /// Sort by reifier timestamp (MIN(?_ts) per source).
     Timestamp,
-    /// Sort by the hydrated row's `timestamp` / `createdAt`: the earliest of
-    /// the links hydration reads, under its filters, bound as `?_first_ts`.
-    /// Not [`Self::Timestamp`], whose probe reads one conformance link (the
-    /// flag) and so can be later. A union over several classes pages on this,
-    /// so every class's creation time is the value its rows carry.
-    CreatedAt,
     /// Sort by a property value extracted from its literal IRI.
     Property(String), // predicate IRI
     /// Sort by a projection count — uses `COUNT(DISTINCT ?_proj_t)` in the
@@ -1126,15 +1120,17 @@ pub(super) enum InstanceQueryPlan {
 }
 
 impl InstanceQueryPlan {
-    /// Extract the SPARQL string for non-paginated queries (Single variant).
-    /// Panics for TwoPhase. Used only in unit tests.
+    /// The patterns of a non-paginated read as one string: the single query, or for a kind with
+    /// a membership check its ids query and the predicate filter its links are read under.
+    /// Used only in unit tests.
     #[cfg(test)]
     pub(super) fn into_single(self) -> String {
         match self {
             InstanceQueryPlan::Single(s) => s,
-            InstanceQueryPlan::TwoPhase { .. } => {
-                panic!("Expected Single query plan, got TwoPhase")
-            }
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                predicate_filter,
+            } => format!("{pagination_subquery}\n{predicate_filter}"),
         }
     }
 }

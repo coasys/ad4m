@@ -19,7 +19,7 @@
 //! unverified link and links of both statuses.
 
 use super::sparql_builder::{
-    build_count_sparql, build_instance_sparql, build_timestamp_probe, LinkGuard,
+    annotation_is, build_count_sparql, build_instance_sparql, build_timestamp_probe, LinkGuard,
 };
 use super::test_helpers::{execute_model_query_from_json, flag, prop, shape};
 use super::types::{InstanceQueryPlan, ModelQueryInput, OrderDirection};
@@ -80,11 +80,11 @@ fn the_guard_checks_stay_on_the_probe_reifier() {
     };
     let probe = build_timestamp_probe(&s, guard);
     assert!(
-        probe.contains("?_r <ad4m://ontology/status> \"Shared\" ."),
+        probe.contains(&annotation_is("?_r", "status", "Shared")),
         "status check on the probe reifier: {probe}"
     );
     assert!(
-        probe.contains("?_r <ad4m://ontology/proofValid> \"true\" ."),
+        probe.contains(&annotation_is("?_r", "proofValid", "true")),
         "verdict check on the probe reifier: {probe}"
     );
 }
