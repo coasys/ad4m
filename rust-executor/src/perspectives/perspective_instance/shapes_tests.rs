@@ -865,11 +865,14 @@ async fn a_persisted_own_link_drops_the_cache_before_the_write_returns() {
 
     let extra = "literal://string:extra";
     perspective
-        .persist_link_diff(&PerspectiveDiff::from_additions(vec![peer_copy(&Link {
-            source: "ns://NoteShape".into(),
-            predicate: Some("ad4m://constructor".into()),
-            target: extra.into(),
-        })]))
+        .persist_link_diff(
+            &PerspectiveDiff::from_additions(vec![peer_copy(&Link {
+                source: "ns://NoteShape".into(),
+                predicate: Some("ad4m://constructor".into()),
+                target: extra.into(),
+            })]),
+            false,
+        )
         .await
         .unwrap();
 

@@ -81,6 +81,11 @@ pub(crate) fn create_identity_tables(conn: &Connection) -> rusqlite::Result<()> 
             offer_id TEXT PRIMARY KEY,
             scid TEXT NOT NULL,
             claimed_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS identity_unlinks (
+            agent_did TEXT PRIMARY KEY,
+            scid TEXT NOT NULL,
+            set_at INTEGER NOT NULL
          );",
     )
 }
@@ -188,6 +193,56 @@ impl Ad4mDb {
         Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
     }
 
+    /// Every identity a local agent speaks for, once each.
+    pub fn local_identities(&self) -> Ad4mDbResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT scid FROM identity_agents ORDER BY scid")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+    }
+
+    /// Records that the unlink of the local agent's device key `agent_did` from `scid` is
+    /// pending (`identity.unlinkSelf`): the key is fenced, and the append of the `unlink` or
+    /// the cleanup after it may not be done. Keeps the first record of an agent.
+    pub fn set_unlink_intent(&self, agent_did: &str, scid: &str, set_at: u64) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO identity_unlinks (agent_did, scid, set_at) VALUES (?1, ?2, ?3)",
+            params![agent_did, scid, to_sql(set_at)],
+        )?;
+        Ok(())
+    }
+
+    /// The SCID of the pending unlink of `agent_did`, if any.
+    pub fn unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT scid FROM identity_unlinks WHERE agent_did = ?1",
+                params![agent_did],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every pending unlink: the agent's `did:key` and the SCID, oldest first.
+    pub fn unlink_intents(&self) -> Ad4mDbResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT agent_did, scid FROM identity_unlinks ORDER BY set_at, agent_did")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<(String, String)>>>()?)
+    }
+
+    /// Forgets the pending unlink of `agent_did`: it is done, or the store refused it.
+    pub fn clear_unlink_intent(&self, agent_did: &str) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "DELETE FROM identity_unlinks WHERE agent_did = ?1",
+            params![agent_did],
+        )?;
+        Ok(())
+    }
+
     /// Remembers a claim this executor made, so `identity.joinStatus` can follow it.
     pub fn add_join(&self, join: &JoinRow) -> Ad4mDbResult<()> {
         self.conn.execute(
@@ -253,6 +308,19 @@ mod tests {
     }
 
     #[test]
+    fn the_local_identities_are_each_bound_scid_once() {
+        let (_dir, db) = db();
+        assert!(db.local_identities().unwrap().is_empty());
+        db.set_agent_identity("did:key:z6MkA", "QmB", 1).unwrap();
+        db.set_agent_identity("did:key:z6MkB", "QmB", 1).unwrap();
+        db.set_agent_identity("did:key:z6MkC", "QmA", 1).unwrap();
+        assert_eq!(
+            db.local_identities().unwrap(),
+            vec!["QmA".to_string(), "QmB".to_string()]
+        );
+    }
+
+    #[test]
     fn an_agent_keeps_the_first_identity_it_joined() {
         let (_dir, db) = db();
         assert_eq!(db.agent_identity("did:key:z6MkA").unwrap(), None);
@@ -280,5 +348,30 @@ mod tests {
         db.add_join(&join).unwrap();
         assert_eq!(db.join("offer").unwrap(), Some(join));
         assert_eq!(db.join("other").unwrap(), None);
+    }
+
+    #[test]
+    fn an_unlink_intent_is_kept_until_cleared() {
+        let (_dir, db) = db();
+        assert_eq!(db.unlink_intent("did:key:z6MkA").unwrap(), None);
+        db.set_unlink_intent("did:key:z6MkA", "QmA", 2).unwrap();
+        db.set_unlink_intent("did:key:z6MkB", "QmB", 1).unwrap();
+        // The first record of an agent stands.
+        db.set_unlink_intent("did:key:z6MkA", "QmZ", 3).unwrap();
+        assert_eq!(
+            db.unlink_intent("did:key:z6MkA").unwrap().as_deref(),
+            Some("QmA")
+        );
+        assert_eq!(
+            db.unlink_intents().unwrap(),
+            vec![
+                ("did:key:z6MkB".to_string(), "QmB".to_string()),
+                ("did:key:z6MkA".to_string(), "QmA".to_string()),
+            ]
+        );
+        db.clear_unlink_intent("did:key:z6MkA").unwrap();
+        db.clear_unlink_intent("did:key:z6MkA").unwrap();
+        assert_eq!(db.unlink_intent("did:key:z6MkA").unwrap(), None);
+        assert_eq!(db.unlink_intents().unwrap().len(), 1);
     }
 }

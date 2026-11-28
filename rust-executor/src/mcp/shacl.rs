@@ -232,6 +232,40 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
     }
 }
 
+/// The classes whose shape read fails as if the store errored: the seam the
+/// `instance_create` locality tests fail the read through. Keyed by class
+/// name and cleared by the test, so one test's failure never reaches another's.
+#[cfg(test)]
+pub(crate) static LOCAL_LOOKUP_FAILS_FOR: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+/// The shape of `class_name` for a locality decision: `Ok(None)` when no class
+/// of that name is registered, `Err` when the read itself failed.
+fn shape_for_locality(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+) -> Result<Option<std::sync::Arc<ModelShape>>, deno_core::error::AnyError> {
+    #[cfg(test)]
+    if LOCAL_LOOKUP_FAILS_FOR
+        .lock()
+        .unwrap()
+        .as_deref()
+        .is_some_and(|fails| fails == class_name)
+    {
+        return Err(anyhow::anyhow!("injected locality lookup failure"));
+    }
+    match perspective.get_shape(class_name) {
+        Ok(shape) => Ok(Some(shape)),
+        Err(e)
+            if e.downcast_ref::<crate::perspectives::model_query::MissingShape>()
+                .is_some() =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve a property name to its predicate URI for a given class.
 /// This is the common operation needed by MCP tools to read/write properties.
 /// Matching is case-insensitive because dynamic tool names are lowercased.
@@ -292,7 +326,19 @@ pub async fn resolve_property_link_status(
     class_name: &str,
     property_name: &str,
 ) -> LinkStatus {
-    let properties = load_class_properties(perspective, class_name).await;
+    // A shape read that fails (not one that finds no class) answers `Local`: a
+    // write the executor cannot see declared private must not be gossiped.
+    let properties = match shape_for_locality(perspective, class_name) {
+        Ok(Some(shape)) => shape_to_shacl_class(class_name, &shape).properties,
+        Ok(None) => vec![],
+        Err(e) => {
+            log::warn!(
+                "the shape read for `{class_name}` failed ({e}); treating `{property_name}` as \
+                 local, so its next write stays on this executor"
+            );
+            return LinkStatus::Local;
+        }
+    };
     let prop_lower = property_name.to_lowercase();
     let is_local = properties
         .iter()

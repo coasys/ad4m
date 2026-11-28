@@ -7,18 +7,20 @@ identity each local agent's device key speaks for, the key logs it checked, and 
 | File | What |
 |---|---|
 | `mod.rs` | `init` (at start, after the database), `service()`, `IdentitySettings` (`identity.storeUrl`, `identity.storeKeys`, else the network seed's `identityStore`; `identity.allowPrivateSrc`), `write_agent_language_settings`, the `identity-fork` publisher; re-exports `verify_expression` |
-| `resolver.rs` | The one place that decides what a log says. `key_speaks_for`, `key_valid_at_anchor` and `verify_expression` (all up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author, for `LanguageController::verify_expression_proof`; `proof.record` anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Later checks (link anchors, verdicts, key login) belong here |
+| `resolver.rs` | The one place that decides what a log says. `key_valid_at_anchor` and `verify_expression` (both up to the log's trusted seq, `KelCache::trusted`) (an expression by a `did:scid` author with its `proof.record`, for `LanguageController::verify_expression_proof`; the record anchors the key); `Resolver::resolve` (`identity.resolve`): DID URL parsing, sources, the up-front `src` check, the negative cache, `did:key` → person, the DID Core result. Links: `check_signed_with` (the verdict and person of a signed link from the key map, no I/O), `Resolver::author_of` / `lookup_signer` (key map, then the key index confirmed against the log), `Resolver::prepare` (fills the key map before links are stored). Key login belongs here too |
+| `verdict.rs` | `LinkVerdict` (`Valid`, `Invalid(reason)`, `CantCheck`, `Flagged`) and `judge`, a pure function of the signature, the anchor, the signer's log and the space order; `KeyVerdict`, `VerdictChange`, `key_verdict` |
 | `src_fetch.rs` | `SrcFetch`: the executor's reader of a foreign `src` over the did:scid host profile (`GET /v1/logs/{scid}?from=`), for `Resolver` only. `PublicOnly` (the client's DNS resolver: public addresses only), `refuse_private_host` (IP literals, `localhost`), no redirects, no proxy, HTTPS only, timeouts, body cap |
 | `backend.rs` | `IdentityBackend` (`log(did, from)`, `key_owner`, …), `IdentityError`; `AgentLanguageBackend` calls the agent language through `agent_language_for` (a JS envelope reads refusals back as `IdentityErrorCode`) |
-| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh) |
+| `cache.rs` | `KelCache`: events in `SqliteChainStore` (`coasys:kel`) in `ad4m_db.sqlite`, the accepted head in `identity_heads`, `refresh` (at most `MAX_PAGES` pages; one fetch per log at a time, and a waiter takes the answer of a fetch that began after it called), `ingest`, `accept` (a lower store head: `Behind` or `Conflict`, a fork only with a valid rival), `trusted` (the log and its accepted head's seq), forks, `reset` (`identity.resetLog`), `refreshed_within` (the in-memory time of each log's last refresh), `store_behind`; fork checks `rival_signer`, `holding_rival` (one fork per signing master, `identity_fork_signers`); `KeyMap` (every trusted log by signing key, and the store's "no log" answers for 15 minutes; `global_key_map`), `subscribe` (a `VerdictChange` when an accepted head changes a key's verdict) |
 | `head.rs` | `verify_head` (`ad4m_identity_core::HeadStatement` under a key of `identity.storeKeys`) |
 | `device.rs` | the agent's device key, its X25519 `enc` key (`did_key`, no second secret), `WalletSigner` |
 | `operator.rs` | `admits_first_link`, `first_link_check`, `main_incept_check`, `record_operator_at_init` (`ad4m-executor init --operator`) |
 | `custody.rs` | The custody channel's guard `admit` (the admin credential on a loopback listener of an executor started with `--custody-channel`; else 403 `no-custody-channel`) and `main_device_keys`; `identity.custodyStatus` is its one call so far |
 | `rekey.rs` | `identity.rekey` (`.local_only()`): a new main wallet key, nothing in a log; the table of every place that holds the main agent's DID and how each moves. One re-key at a time, in its own task (a dropped caller does not stop it); owners move from every retired main key, so the next re-key repairs what an earlier one left |
+| `unlink.rs` | `identity.unlinkSelf` (`UserLoginOrOperator(agent:UPDATE)`: the operator or a user's own login, no app token): the device key unlinks itself from its identity, signed with its own wallet key (the core's `build::unlink_self`), no master key; then the key is dead here: the main agent re-keys (`rekey::rekey_main`), a managed agent's key is retired (`AgentService::retire_managed_key`) and its grants revoked, and in both cases the retired key's secret is deleted (`AgentService::destroy_retired_key` → `Wallet::destroy_secret`; the public key stays, so what it signed still verifies). Before the publish an intent is stored (`db/identity.rs` `identity_unlinks`) and the key is fenced (`agent/fence.rs`: `sign_for_context` refuses it; only the `unlink` signs through `sign_for_context_unfenced`). The device seed also derives the key's X25519 key, so the deletion destroys that too: anything sealed only to the old `did:key` cannot be opened on this executor afterwards. The deletion also removes the legacy keystore backup (`agent.json.legacy`), which holds the secret otherwise; when that fails the intent stays and the resume tries again. A sure refusal clears both only when the store said so (400, 403, key-taken, or a check before the append; `publish_classified`/`PublishFailure::refused`), the log read afresh shows no `unlink`, and this call made the intent; a refusal on top of an intent an earlier call left, a refusal whose log read fails, and every ambiguous failure (transport, 429, 5xx, a cache error after the append) keep both; a retry, startup (`load_local_identities`) and wallet unlock finish a pending intent (`resume_pending`), and a retry on a key the log shows unlinked or revoked whose secret is still here cleans it up instead of answering `key-dead`. Refused with 409 `no-identity`, `not-listed`, `key-dead` (already ended and cleaned up) or `cannot-retire-key` (a shared wallet). One at a time; the cleanup runs on its own task. `end_sessions_of`: when the cache learns that a key of an agent here was unlinked or revoked in its log (by another device, with the master key), that agent is ended the same way: grants end, the key is retired and its secret deleted (the main agent re-keys); an agent with a pending intent is left to its own cleanup. While the wallet is locked a key cannot be told live from absent, so the end is recorded as an intent and the key fenced, and the unlock's `resume_pending` finishes it (an intent whose key is no longer in the wallet is only cleaned up: grants, retired secret, intent). Reacts to the live `VerdictChange`s and to the keys found at start; on a lag, and after the held logs load, `sweep_dead_keys` checks every local agent against its own trusted log |
 | `person.rs` | the person's profile: `person_record` (the agent record under the `did:scid` and its signed request, by the device key at the trusted head), `IdentityService::publish_person_profile` |
 | `claim.rs` | `ClaimService::claim_for_main` (`already-linked`, first-link rule, claim with the main wallet key, never `canKeepMaster`), `join_status` (the main agent's claims only) |
-| `service.rs` | `IdentityService`: status, log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
+| `service.rs` | `IdentityService`: status (`revoked` and `unlinked` of the device key), log, resetLog, cosignIncept, publish, openOffer, offers, devices; error mapping |
 | `types.rs` | the RPC contracts (ts-rs) mirroring `ad4m_ldk::identity`'s JSON, `IdentityForkEvent`, `AgentWithIdentity` |
 
 Rows in `db/identity.rs`, reached through `db_backend()` (`service::db`): `operator_record`, `identity_agents` (agent `did:key` → SCID),
@@ -114,8 +116,8 @@ the offer's state).
   the person): the seq of the accepted head, while it still verifies under the current
   `identity.storeKeys` and the cached event at that seq has its hash. No such head: no key
   speaks for that person. The state counts at that seq: a key added past it does not speak yet, a revocation past it does not
-  count yet. The readers: `key_speaks_for` and `key_valid_at_anchor` (so `verify_expression`,
-  with and without `proof.record`), the `did:key` confirmation in `resolve_key`,
+  count yet. The readers: `key_speaks_for` (so `IdentityService::identity_of`),
+  `key_valid_at_anchor` (so `verify_expression`), the `did:key` confirmation in `resolve_key`,
   `record_agent_if_listed` (binding a local agent to an identity; a bot key binds none) and `main_is_linked`
   (`already-linked`). Events past the trusted seq, and every event a foreign `src` served, are
   for resolution display only (`identity.resolve` shows them, `coasys:headTrusted: false`).
@@ -167,7 +169,10 @@ the offer's state).
   `agent:SIGN` and `agent:UPDATE` by default, so their guard is `Guard::UserOrOperator`: for
   the main agent only the operator (the admin credential the custody service holds), never an
   app token on the main agent; a user's session (or an app the user approved) for its own
-  managed agent.
+  managed agent. `unlinkSelf` ends the device key for good, so its guard is
+  `Guard::UserLoginOrOperator`: the operator, or a user's login on a managed agent
+  (`LiveGrant::is_login`: the grant's `request_id` is its own id), never an app the user
+  approved, though it holds `agent:UPDATE`.
 - The store's URL and keys (`IdentitySettings`) reach the agent language only through
   `write_agent_language_settings` (atomic: temp file + rename), as its `storeUrl` and
   `storeKeys` settings, on every start: no store or no keys removes the setting, so an earlier
@@ -176,10 +181,20 @@ the offer's state).
   startup (`check_store_url`: the language would read it as unset). When the write fails,
   `LanguageController::install_agent_language` does not load the agent language, so no
   profile or identity call goes to an older store; identity calls answer `unavailable`.
-- An expression by a `did:scid` author verifies only under its `proof.key` (a bare `did:key`)
-  and only when its own signature holds under that key. Which seq of the log counts:
-  - With `proof.record` (`{version, anchor, sig}`, which the agent language adds to a
-    `did:scid` profile from its agent record): the record's anchor. `sig` must be the key's
+- **A `did:scid` author counts only on the agent language's profile.** An expression's author
+  is its signing device's `did:key`; the person is derived from the signer's log, never
+  written as author. The one exception is the profile the agent language serves with the
+  agent record its store admitted. So `LanguageController::verify_expression_proof` takes a
+  `did:scid`-authored expression as valid only when the agent language served it
+  (`LanguageController::honours_record`) and it carries a non-null `proof.record`; any other
+  (another language, a literal, the language language, or no record) is not valid, whatever
+  its signature. The store takes a `did:scid` record only with an anchor, and the agent
+  language answers a `did:scid` profile only with its `proof.record`, so no legitimate
+  profile lacks one.
+- Such a profile verifies only under its `proof.key` (a bare `did:key`) and only when its own
+  signature holds under that key, at the record's anchor (`verify_expression`):
+  - `proof.record` is `{version, anchor, sig}`, which the agent language adds to a
+    `did:scid` profile from its agent record. `sig` must be the key's
     `coasys:agent-record` signature over `{profile, version, anchor}`, `profile` the expression without
     `proof.record` (and without `proof.valid`/`proof.invalid`), as `AgentRecord::signed_value`
     builds it; the anchor must be at or below the trusted seq (not merely the cached head);
@@ -187,13 +202,12 @@ the offer's state).
     (`key_valid_at_time`) and without the bot mark there. A profile signed before a revocation
     stays valid after it. A `proof.record` that does not hold (malformed, an unknown member, a
     bad signature, an anchor past the trusted seq, a key not valid there) makes the expression
-    invalid: the head rule is never tried instead. The anchor counts only through the record
-    signature.
-  - Without it: the trusted seq, by the clock now, without the bot mark.
-  - `proof.record` counts only on an expression the agent language served
-    (`LanguageController::honours_record`): its store refuses a record anchored before a
-    revocation of its key. From any other language, a literal or the language language, the
-    record is ignored and the head rule judges.
+    invalid. The anchor counts only through the record signature.
+  - The record counts only from the agent language: its store refuses a record anchored
+    before a revocation of its key, while anyone else can wrap a fresh signature by a revoked
+    key in a record naming an earlier anchor.
+  - `verify_expression` takes the record: there is no rule for a `did:scid` expression
+    without one.
 
   The expression's own timestamp never counts. When the cached log does not admit the key (no
   log or no store-signed head yet, a trusted seq below the anchor, or a device added since),
@@ -205,15 +219,17 @@ the offer's state).
 - **A positive verdict is fresh for `resolver::ADMIT_FRESHNESS` (60 s).** When the cached log
   admits the key but last refreshed from the configured store longer ago than that (the time is
   kept in memory only, so after a restart every log is stale), the read refreshes it once and
-  checks again, so a revocation at the store reaches every reader within the window. Offline
-  policy: when that refresh fails (the store unreachable or behind, a conflict, a fork) the cached trusted head
+  checks again, so the cached log follows the store within the window. The anchor fixes a
+  profile's verdict: a revocation the refresh brings in does not touch a profile anchored
+  before it. Offline policy: when that refresh fails (the store unreachable or behind, a
+  conflict, a fork) the cached trusted head
   answers, and the failed attempt counts as the window's read, so an unreachable store is tried
   once per window per log, not on every read.
 - An agent keeps the first identity it joined (`identity_agents`); `agent.status` and
   `agent.get` carry it as `identity` only while the agent speaks for it
   (`IdentityService::identity_of`: `key_speaks_for` at the trusted seq, no store read), so after
   a revocation of its key reaches the trusted seq they answer `identity: null` while
-  `identity.status` still shows the binding with `revoked`. `did` stays the device `did:key` (and
+  `identity.status` still shows the binding with `revoked` (or `unlinked`). `did` stays the device `did:key` (and
   `agent.status().didDocument` the device's did:key document; `identity.resolve` serves the
   person's).
 - **An agent that speaks for a person publishes the person's profile** under the `did:scid`
@@ -236,6 +252,160 @@ the offer's state).
   `unlock_main_agent`), so profiles an earlier agent language held reach the configured store.
   A failure is logged and the next user is tried; so is a publish that takes longer than
   `MANAGED_PROFILE_PUBLISH_TIMEOUT` (60 s), which is dropped and so frees the publish lock.
+
+## Links: anchor, verdict, person
+
+- **The anchor.** A link that a bound agent signs (`agent::create_signed_link`,
+  `identity::anchor_for`) carries `proof.anchor`: the trusted seq of its identity's log, when
+  that log lists the agent's key as a device key. Its signature covers
+  `coasys:link` `{data, timestamp, anchor}` (`signatures::anchored_signing_bytes`), the
+  timestamp as the link carries it. A link without an anchor signs the old bytes. The anchor
+  is in the proof on the wire and in the link store (`ad4m://ontology/proofAnchor`).
+  Signing is synchronous: the anchor comes from the key map, with no I/O. The logs of local
+  identities (rows in `identity_agents`) are loaded at start (`load_local_identities`, before
+  the API and perspectives) and on each binding (`KelCache::keep_local`), and are pinned
+  (`KeyMap::pin`), so the map's bound never drops them; a link signed after a newer head is
+  accepted carries the new anchor.
+- **The key map follows the trusted seq only.** `KelCache` puts a log in it from `trusted` and
+  from `accept` when a head is accepted (`publish_trusted`), and nowhere else. A store
+  `Behind`, a `Conflict` or a fork leaves the accepted head, so the map keeps answering the
+  cached trusted log: `lookup_signer` reads the cache after a failed refresh (only
+  `Unavailable` answers `Unknown` and trips `BREAKER`). A fork is decided only by the cache's
+  and the resolver's `holding_rival`; the key lookups never judge a rival themselves.
+  `resetLog` drops the log from the map (`KeyMap::forget`) with the rest of the copy, and the
+  store-behind note with it.
+- **One check.** `signatures::verify`, `LinkExpression::check` and
+  `DecoratedLinkExpression::check` all go to `identity::check_signed`: the signature over the
+  bytes the proof names, then `verdict::judge` on what the key map holds. The check does no
+  I/O, so it runs the same in the store, in flows and in every recompute.
+  `identity::prepare_link_signers` fills the key map first (`persist_link_diff`, the
+  re-check).
+- **The rules** (`judge`). A bad signature: `invalid`. No anchor and no log that lists the
+  key: `valid`, as before key logs. No anchor and a log lists the key: judged as anchored at
+  the seq that added the key. With an anchor: no log lists the key, `invalid`; nothing known
+  or the anchor past the trusted seq, `cantCheck`; a master key, `invalid`; the key added
+  after the anchor, revoked at or before it, or unlinked at or before it, `invalid`; a bot key whose scope is past its
+  `expires` by the clock now, `invalid`. A key revoked after the anchor: `valid` only when the
+  link is known to have entered before the `revoke`, else `flagged`. The only order a store
+  knows is its own history (`check_entered`): a link it already counted (stored `valid`)
+  before the revocation was accepted. Otherwise the link is `flagged`, and stays so until
+  the space's order (identity slice 3.B) says which came first; a reader that synced
+  after the revocation shows an earlier link of the key `flagged` where an early reader
+  counted it. No attestation stands in for that order.
+  **`since`**: a `revoke` may name a `since` (ms). A link of the revoked key that this
+  executor first received at or after it is `flagged`, even when stored `valid` before. The
+  time is the executor's own, never the link's timestamp or anchor. The link store keeps it
+  as a receipt of the signed statement, not on the link: one receipt per proof key and
+  signature (a hash of both, length-prefixed), `ad4m://ontology/receivedAt` on a
+  `receipt:<hash>` node in the named graph `ad4m://receipts`, which no link read, SPARQL
+  query, snapshot or export touches. It is written only for a proof whose signature holds,
+  only when none exists (set once, never changed), and nothing removes it: a removal and a
+  re-add (a local diff or a peer's, which removes before it adds), a re-check, a rewrite and
+  `clear` keep it. A forged proof of the same fields gets none, so it cannot lend its time to
+  the real signature that arrives later. The judge reads the receipt of the link's stored
+  proof. A link first received before `since` keeps the rule above; a link stored before
+  receipts has none and is judged by that rule too. A revoke with a `since` fires the same `VerdictChange` as any revoke, and the
+  re-check re-judges the key's stored links, `valid` ones included.
+  **`unlink`**: a link of an unlinked key anchored below the unlink's seq is judged as for
+  an active key; anchored at or after it, `invalid` (`unlinked`). An unlink fires the same
+  `VerdictChange` as a revoke (`KeyVerdict::Unlinked`), and the link re-check follows. Known limit: a surviving unlinked key's holder can still sign a link with
+  an old anchor, and it counts until the person revokes (with a `since`). So the client's
+  self-unlink destroys the local key.
+- **Admission needs a confirmed head** (`check_signed_with`, `KeyMap::admits`). A new link
+  counts (`valid`) only when the store confirmed the signer's trusted head (`accept`,
+  `KeyMap::note_confirmed`) less than `ADMIT_FRESHNESS` ago, whatever its anchor: an older
+  head may miss a revocation of the key. Otherwise the link is `cantCheck`, and `prepare`
+  re-reads the log (at most once per window); with the store unreachable it stays
+  `cantCheck` and the 60 s re-check tries again. Exempt: a link this executor signs during
+  the call that writes it (`addLink`, `addLinks`, `linkMutations`, `updateLink`, `commitBatch`
+  and the paths through them — `check_signed_own`, the store's `own` write), so local links
+  count offline, and a link already counted. Every write of a link that arrives already
+  signed is judged as a peer's is — `addLinkExpression`, `import_perspective`, the
+  rusqlite migration and the boot rebuild, a link language's diff, a re-check — whichever
+  key signed it: the same key, copied and revoked, may have signed it elsewhere. The bulk
+  import (`runtime.importData`) is offline and prepares no signers, so it judges with
+  `check_signed_import`: an unanchored link from a signer the key map has not been asked
+  about is `cantCheck`, not `valid`, and the 60 s re-check (`Recheck::CantCheck`) fetches
+  the log and judges it. A restart confirms nothing until each log is read again. `ADMIT_FRESHNESS` is
+  the exposure after a revocation: for up to 60 s after the store holds a `revoke`, this
+  executor may still count new links by the revoked key. A link admitted in that window
+  stays counted (stored `valid`, so the re-check keeps it): without the store's append
+  order the executor cannot tell it from one signed before. A new link after the read
+  that shows the revocation is `flagged`.
+- **Unknown is not "no log".** A failed key-index call answers `Unavailable` and is never
+  kept; the index is not asked again for 30 s (`BREAKER`). An unanchored link by an unknown
+  key stays `valid` with no person; an anchored one is `cantCheck`. One `prepare` asks the
+  index about at most `DISCOVERY_PER_BATCH` (64) signers the key map does not know; the
+  others stay unknown for that batch and are found by a later batch or the re-check. A key
+  asked about and unanswered is `pending` (`KeyMap::note_pending`): its unanchored link is
+  `cantCheck`. The bound (`KEY_MAP_BOUND`) never drops a fresh mark: a full set drops marks
+  older than `PENDING_TTL`, and if still full, every key with no fresh answer counts as
+  pending for `PENDING_TTL` (`pending_full_until`). Those marks serve later checks only. The
+  batch that asked keeps its own record: `prepare` returns a `PendingHold` (`KeyMap::hold`,
+  refcounted, outside the bound) naming every signer it prepared, and each caller keeps it
+  until the batch's links are judged. A held key with no answer at judgment is pending
+  whatever the marks did meanwhile (a prune past `PENDING_TTL`, a lapsed full window), since
+  nothing bounds how long a prepare's serial refreshes take.
+- **The person** is derived, never on the wire: the `did:scid` of the signer's log (a bot
+  key: its owner), only for a `valid` link. The link store keeps it beside the verdict
+  (`ad4m://ontology/person`, `ad4m://ontology/linkVerdict`) for SPARQL; `proofValid` is `true`
+  exactly for `valid`. A found person stays for good; "no log" holds for 15 minutes.
+- **The re-check** (`run_recheck`, started by `init`): on each `VerdictChange` the links of
+  that key; every 60 s the links of bot keys
+  whose scope `expires` fell since the last tick (`KeyMap::expiring` plus the journaled
+  marks, below — a log the map dropped still has its row), then the `cantCheck` links. A
+  `flagged` link is not swept: it waits for 3.B's space order. Each is judged again and
+  rewritten when
+  the verdict or person changed (`PerspectiveInstance::recheck_links`), except that neither
+  a re-check nor a write of the same proof ever replaces a stored `valid` with `cantCheck`
+  (`verdict::replaces`): the stored `valid` is the order the executor knows, and a log that
+  is out of the key map for a while (before `load_held`, an eviction, `identity.resetLog`)
+  must not cost it. `invalid` and `flagged` need no such guard: they are judged again from
+  the log alone once it is back. Before judging, a re-check reads back from the cache the
+  log each stored person names when the map does not hold it (`identity::read_logs_of`, no
+  store or index call). A log the cache cannot read then leaves the re-check incomplete:
+  its links keep their stored verdict for now, and the scope answers failure, so
+  `run_recheck` runs it again on the next tick (`failed` signers, `logged_failed`).
+- **The change journal** (`identity_key_marks` in `ad4m_db.sqlite`, written by
+  `publish_trusted`): one row per key a newly accepted head changed, one per bot scope that
+  expires, each with its log's scid. It survives a receiver lag, a restart and a key-map
+  eviction — the three ways the key map alone forgets a change. When the change receiver
+  lags (a start-up load past the bound overflows `CHANGES_CAPACITY` while it evicts logs),
+  `lag_scopes` re-checks the keys the map lists, the keys journaled since the last sweep
+  (`marked_since`, their logs read back into the map first so the links are judged with
+  them) and then every link stored with a person (`Recheck::Logged`), so a lost change of a
+  log already evicted is still made up for — including a link stored `valid` with no person
+  whose log only arrived inside the lost window. The expiry tick likewise reads a journaled
+  log back before re-judging its bot's links (`expired_signers`, `marked_expiring`). `reset`
+  drops a log's rows with the rest of its copy. The journal stays small: a mark is one row
+  per `(key, scid, expires-or-none)` (a unique index over `IFNULL(expires, -1)`, since the
+  table's own `UNIQUE` does not hold for NULL; a repeated mark, such as a revoked key
+  reported again when its evicted log is read back, is `ON CONFLICT DO NOTHING`; the schema
+  migration collapses duplicates an earlier release wrote). `run_recheck` retires rows once
+  their reader is past them (`retire_marks`): a change mark when a lag sweep passed its id
+  (`marks_swept`), a scope mark when the tick read its `expires` (`expired_until`). With no
+  lag, change marks stay until the next sweep, at most one per key and log.
+  `marked_expiring` uses an index that leads on `expires`. Reads page by
+  reifier IRI (`RECHECK_BATCH` rows): a key's links are read to the last page; the
+  `cantCheck` pass reads one page per tick from `recheck_cursor` and wraps at the end, so
+  links that stay unresolvable do not hide the ones after them. Rewritten links go through
+  `update_prolog_engines` like a remote diff: Prolog, notifications and live queries and
+  model subscriptions hear the new verdicts.
+- **Rollout.** The anchor is in the link's proof on the wire. A neighbourhood whose link
+  language predates it (the old p-diff-sync DNA) drops `proof.anchor`, so an anchored link
+  arrives with a signature over bytes the receiver cannot rebuild and is `invalid`. Moving a
+  neighbourhood whose members bind identities to this release is a migration (published
+  again on a link language from the new DNA, its links copied), not a mixed-version
+  rollout. See `bootstrap-languages/p-diff-sync/README.md`, "Link proofs".
+- **Reads.** Logic reads (model queries, flows, SHACL, SDNA facts) count only links with
+  `proofValid` `true`; so does the shape registry (`shape_registry`, behind `shapes`,
+  `class_names`, `class_keys`, and the diff `register_shapes` makes), as `load_shape` does, so
+  a class a peer sent with links that do not count is no class and a counting copy is written
+  over it. The display reads `perspective.queryLinks` and `perspective.snapshot`
+  (`get_links_shown`) leave out `invalid` links and return `cantCheck` and `flagged` ones with
+  `verdict`; with `includeUnverified: true` on the `LinkQuery` they return `invalid` links too
+  (so an owner can find and remove them; removal does not check the verdict).
+  `PerspectiveInstance::get_links` returns every stored link with its verdict.
 
 ## DID resolution (`identity.resolve`)
 

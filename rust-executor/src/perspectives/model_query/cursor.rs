@@ -254,6 +254,7 @@ mod pipeline_tests {
             proof: ExpressionProof {
                 key: "key".into(),
                 signature: "sig".into(),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
         }

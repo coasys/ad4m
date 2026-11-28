@@ -176,6 +176,15 @@ pub use verdict::ReceiptVerdict;
 /// [`load_shacl_flows`](crate::perspectives::flow_context::load_shacl_flows)
 /// returns and [`accept`](super::accept) and [`propose`](super::propose)
 /// already take.
+///
+/// The carried links are re-judged under the same live admission window as
+/// a write, so the async entry points refresh the signers' key logs first
+/// ([`ReadSet::prepare_carried_signers`](super::ReadSet::prepare_carried_signers),
+/// called by `verify_flow_receipt`, `flow_valid_outputs`,
+/// `produced_at_by_instance` and `mint_flow_receipt`): an honest old receipt
+/// then verifies on a head the store just confirmed, and a replica that
+/// cannot read the store stays undecided rather than counting on a stale
+/// one.
 pub fn verify_receipt(
     catalogue: &HashMap<String, SHACLFlow>,
     receipt: &FlowReceipt,

@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(added[0].predicate.as_str(), "ns://body");
 
         let before = g(&store);
-        store.apply_diff(&[], &[make(2), make(3)]).unwrap();
+        store.apply_diff(&[], &[make(2), make(3)], false).unwrap();
         assert_eq!(since(&store, before).map(|l| l.len()), Some(2));
 
         let before = g(&store);
@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(since(&store, before), None, "a removal");
 
         let before = g(&store);
-        store.apply_diff(&[make(3)], &[make(4)]).unwrap();
+        store.apply_diff(&[make(3)], &[make(4)], false).unwrap();
         assert_eq!(since(&store, before), None, "a diff with a removal");
 
         let before = g(&store);

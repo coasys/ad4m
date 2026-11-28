@@ -6,6 +6,11 @@ export class LinkQuery {
     fromDate?: Date;
     untilDate?: Date;
     limit?: number;
+    /**
+     * A read leaves out links whose verdict is `invalid`. With this set it returns
+     * them too, each with its verdict (so an owner can find and remove them).
+     */
+    includeUnverified?: boolean;
 
     constructor(obj: object) {
         if(obj) {
@@ -30,6 +35,11 @@ export class LinkQuery {
             if (obj.limit !== undefined && obj.limit !== null) {
                 // @ts-ignore
                 this.limit = obj.limit;
+            }
+            // @ts-ignore
+            if (obj.includeUnverified) {
+                // @ts-ignore
+                this.includeUnverified = obj.includeUnverified;
             }
         }
     }

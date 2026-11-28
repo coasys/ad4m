@@ -179,6 +179,24 @@ impl ReceiptVerdict {
     pub fn is_undecidable(&self) -> bool {
         self.outcome() == VerdictKind::Undecidable
     }
+
+    /// Was this verdict reached before the fold read a carried verdict —
+    /// decided by the receipt's bytes and the held definition alone, so the
+    /// same `(receipt URI, held definition)` key can never answer
+    /// differently. [`VerdictMemo`](super::memo::VerdictMemo) keeps a refusal
+    /// only when this holds: a verdict the fold produced can rest on a
+    /// carried link this replica judged `cantCheck`, which changes under the
+    /// same key once the signer's log lands. `Unfoldable` stays out: a fold
+    /// refusal can rest on that same judgement.
+    pub fn is_structural(&self) -> bool {
+        matches!(
+            self,
+            Self::FlowUnknown { .. }
+                | Self::DnaChanged { .. }
+                | Self::NoOutputs
+                | Self::SealMismatch { .. }
+        )
+    }
 }
 
 impl std::fmt::Display for ReceiptVerdict {

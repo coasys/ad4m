@@ -3,7 +3,7 @@
 //! read, so a write that landed in between is not overwritten.
 
 use super::{PerspectiveInstance, TimestampedBatch};
-use crate::agent::{create_signed_expression, AgentContext};
+use crate::agent::{create_signed_expression_anchored, did_for_context, AgentContext};
 use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, LinkExpression, LinkStatus, PerspectiveDiff,
 };
@@ -137,9 +137,11 @@ impl PerspectiveInstance {
             removals: Vec::new(),
         };
 
+        let anchor = crate::identity::anchor_for(&did_for_context(context)?);
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+            let signed_expr =
+                create_signed_expression_anchored(link.data.normalize(), context, anchor)?;
             let mut stored = LinkExpression::from(signed_expr);
             stored.status = Some(status.clone());
             persist_diff.additions.push(stored.clone());
@@ -189,6 +191,9 @@ impl PerspectiveInstance {
         };
 
         let changed = !combined_diff.additions.is_empty() || !combined_diff.removals.is_empty();
+        // The store judges each link from the key map without I/O: fill it for the
+        // signers first, before taking `persist_lock`.
+        let _signers = crate::identity::prepare_link_signers(&persist_diff.additions).await;
 
         {
             let _persisting = self
@@ -209,9 +214,19 @@ impl PerspectiveInstance {
             // The SPARQL store must be updated first so any subscription re-checks
             // triggered by update_prolog_engines() see the committed batch state.
             if changed {
-                let effects = self.write_link_diff(&persist_diff)?;
+                let effects = self.write_link_diff(&persist_diff, true)?;
                 effects.fold_into(&mut combined_diff);
                 effects.fold_into(&mut published);
+                // The reply and the link-added event carry the judgement the
+                // store wrote; `prepare_link_signers` ran above.
+                combined_diff.additions =
+                    self.stored_judgements(std::mem::take(&mut combined_diff.additions));
+                published.additions =
+                    self.stored_judgements(std::mem::take(&mut published.additions));
+                // The same for the new half of each link-updated event.
+                for (_, new) in &mut updated {
+                    *new = self.stored_judgements(vec![new.clone()]).remove(0);
+                }
             }
         }
 

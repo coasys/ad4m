@@ -26,8 +26,8 @@ use crate::types::RequestContext;
 use serde_json::Value;
 
 /// Who may call a method. The dispatcher checks the capability (403), then the rule of the
-/// variant (403 for [`Guard::Operator`], [`Guard::Executor`] and [`Guard::UserOrOperator`], 404
-/// for [`Guard::Owns`]).
+/// variant (403 for [`Guard::Operator`], [`Guard::Executor`], [`Guard::UserOrOperator`] and
+/// [`Guard::UserLoginOrOperator`], 404 for [`Guard::Owns`]).
 #[derive(Clone, Debug)]
 pub enum Guard {
     /// No check: every caller reaches the handler, anonymous ones included, and the handler
@@ -60,6 +60,12 @@ pub enum Guard {
     /// default capabilities of every app cover the check, and the call binds the main agent
     /// for good (`identity.cosignIncept`, `identity.publish`).
     UserOrOperator(Capability),
+    /// Acts for a user's own session, never for an app: the capability, then the operator or
+    /// a user's login ([`LiveGrant::is_login`]) on a managed agent. An app grant is refused
+    /// though it is on a managed agent and holds the capability, and so is a grant on the main
+    /// agent: for a call that ends the device's key for good (`identity.unlinkSelf`), which a
+    /// user must decide and an app token must not.
+    UserLoginOrOperator(Capability),
     /// Acts on one resource that `id` reads from the params: the capability, then the owner
     /// rule. The operator reaches every resource; any other session only those its agent
     /// owns ([`Owner`]). Missing and not yours are both 404.
@@ -234,7 +240,8 @@ impl Guard {
             Guard::Cap(cap)
             | Guard::CapAnyPointer(cap)
             | Guard::Executor(cap)
-            | Guard::UserOrOperator(cap) => Some(cap.clone()),
+            | Guard::UserOrOperator(cap)
+            | Guard::UserLoginOrOperator(cap) => Some(cap.clone()),
             Guard::Owns { cap, .. } => Some(cap(vec![id.to_string()])),
         }
     }
@@ -284,6 +291,20 @@ impl Guard {
                 Ok(())
             }
             Guard::UserOrOperator(_) => Err(WsRpcError::forbidden(format!(
+                "{method} for the main agent needs the admin credential"
+            ))),
+            Guard::UserLoginOrOperator(_) if ctx.is_operator() => Ok(()),
+            Guard::UserLoginOrOperator(_)
+                if ctx.session.is_authenticated() && !ctx.acts_as().is_main_agent() =>
+            {
+                match ctx.session.grant() {
+                    Some(grant) if grant.is_login() => Ok(()),
+                    _ => Err(WsRpcError::forbidden(format!(
+                        "{method} may not be called by an app, a user must call it"
+                    ))),
+                }
+            }
+            Guard::UserLoginOrOperator(_) => Err(WsRpcError::forbidden(format!(
                 "{method} for the main agent needs the admin credential"
             ))),
             Guard::Owns { .. } => {
@@ -401,6 +422,72 @@ mod tests {
 
         // The capability still comes first for a user.
         let bare = RequestContext::user_for_test("did:key:alice", vec![]);
+        assert_eq!(
+            guard
+                .admit(method, &Value::Null, &bare)
+                .await
+                .unwrap_err()
+                .code,
+            403
+        );
+    }
+
+    /// A session on the managed agent `did` within a grant that answers `request_id` (an
+    /// app's), or its own id (a login).
+    fn session_on(did: &str, request_id: &str, caps: Vec<Capability>) -> RequestContext {
+        use crate::agent::grants::LiveGrant;
+        let agent = crate::agent::AgentContext::managed(did.to_string());
+        let mut grant = LiveGrant::for_test("token-1", agent.clone(), u64::MAX);
+        grant.request_id = request_id.to_string();
+        RequestContext::for_session(
+            crate::agent::session::Session::for_test(crate::agent::session::Principal::Agent(
+                agent,
+            ))
+            .with_caps(caps)
+            .with_did(did)
+            .with_grant(std::sync::Arc::new(grant)),
+        )
+    }
+
+    /// A user's own session or the operator, never an app the user approved: the capability
+    /// is not what tells them apart, the grant is.
+    #[tokio::test]
+    async fn a_user_login_guard_refuses_apps_and_the_main_agents_grants() {
+        let update = crate::agent::capabilities::AGENT_UPDATE_CAPABILITY.clone();
+        let guard = Guard::UserLoginOrOperator(update.clone());
+        let method = "identity.unlinkSelf";
+
+        let app = session_on("did:key:alice", "request-1", vec![update.clone()]);
+        let err = guard.admit(method, &Value::Null, &app).await.unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "identity.unlinkSelf may not be called by an app, a user must call it"
+            )
+        );
+
+        let login = session_on("did:key:alice", "token-1", vec![update.clone()]);
+        assert!(guard.admit(method, &Value::Null, &login).await.is_ok());
+
+        let operator = RequestContext::operator_for_test();
+        assert!(guard.admit(method, &Value::Null, &operator).await.is_ok());
+
+        let main_agent = RequestContext::app_for_test(vec![update.clone()]);
+        let err = guard
+            .admit(method, &Value::Null, &main_agent)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (
+                403,
+                "identity.unlinkSelf for the main agent needs the admin credential"
+            )
+        );
+
+        // The capability still comes first for a login.
+        let bare = session_on("did:key:alice", "token-1", vec![]);
         assert_eq!(
             guard
                 .admit(method, &Value::Null, &bare)

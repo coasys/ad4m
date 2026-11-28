@@ -8,6 +8,9 @@ export class ExpressionProof {
     key: string;
     valid?: boolean;
     invalid?: boolean;
+    /** The seq of the signer's key log the expression is anchored at. With it, the
+     *  signature covers `coasys:link` `{data, timestamp, anchor}`. */
+    anchor?: number;
 
     constructor(sig: string, k: string) {
         this.key = k
@@ -19,6 +22,7 @@ export class ExpressionProofInput {
     key: string;
     valid?: boolean;
     invalid?: boolean;
+    anchor?: number;
 }
 
 /** The fields every expression carries, with `DataType` as its data. */

@@ -10,7 +10,7 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -25,7 +25,7 @@
       },
       "didDocumentMetadata": {
         "deactivated": true,
-        "versionId": "6"
+        "versionId": "7"
       },
       "version": null
     },
@@ -34,7 +34,7 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -93,7 +93,7 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -167,7 +167,7 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -240,7 +240,7 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -298,7 +298,65 @@
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
+        ],
+        "alsoKnownAs": [
+          "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
+        ],
+        "assertionMethod": [
+          "#d1"
+        ],
+        "authentication": [
+          "#d1"
+        ],
+        "capabilityInvocation": [
+          "#d3"
+        ],
+        "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+        "id": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+        "keyAgreement": [
+          "#d1-enc"
+        ],
+        "verificationMethod": [
+          {
+            "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+            "id": "#d1",
+            "publicKeyMultibase": "z6MkoLDHstjfesQKtngXMequRUhP96dNkWrGDghVxxCoksYQ",
+            "type": "Multikey"
+          },
+          {
+            "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+            "id": "#d1-enc",
+            "publicKeyMultibase": "z6LSoKsNQ3ZWym1Qsf7fL6ajAHqjpzaudw4hEvtzA8ejGDgz",
+            "type": "Multikey"
+          },
+          {
+            "coasys:bot": {
+              "can": [
+                "read"
+              ],
+              "expires": 1900000000
+            },
+            "controller": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+            "id": "#d3",
+            "publicKeyMultibase": "z6Mkmu4QQQajcBEcm7r2iumaUyNZ45t5tUuojTUUSzdX3kYr",
+            "type": "Multikey"
+          }
+        ]
+      },
+      "didDocumentMetadata": {
+        "deactivated": true,
+        "nextVersionId": "5",
+        "versionId": "4"
+      },
+      "version": 4
+    },
+    {
+      "didDocument": {
+        "@context": [
+          "https://www.w3.org/ns/did/v1",
+          "https://w3id.org/security/multikey/v1",
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -328,17 +386,17 @@
       },
       "didDocumentMetadata": {
         "deactivated": true,
-        "nextVersionId": "5",
-        "versionId": "4"
+        "nextVersionId": "6",
+        "versionId": "5"
       },
-      "version": 4
+      "version": 5
     },
     {
       "didDocument": {
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -386,17 +444,17 @@
       },
       "didDocumentMetadata": {
         "deactivated": true,
-        "nextVersionId": "6",
-        "versionId": "5"
+        "nextVersionId": "7",
+        "versionId": "6"
       },
-      "version": 5
+      "version": 6
     },
     {
       "didDocument": {
         "@context": [
           "https://www.w3.org/ns/did/v1",
           "https://w3id.org/security/multikey/v1",
-          "https://id.coasys.org/ns/did-scid-coasys/v1"
+          "https://coasys.id/ns/did-scid-coasys/v1"
         ],
         "alsoKnownAs": [
           "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c?src=store.example"
@@ -411,9 +469,9 @@
       },
       "didDocumentMetadata": {
         "deactivated": true,
-        "versionId": "6"
+        "versionId": "7"
       },
-      "version": 6
+      "version": 7
     }
   ],
   "events": [
@@ -521,14 +579,32 @@
     },
     {
       "format": "coasys/1",
-      "op": "revoke",
+      "op": "unlink",
       "prev": "QmWa1oi3x68BNmsi82VLivJsFkWGnnQ8Djy9594KPm3xmg",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z65sPdnvZi7p8mmCxuq7FyXFDeKZc3SLz8pNSnPWvzDQGuxpNYzjkyXpJiq5q436vTXZiwxEAGXL2jQSUwNzxZnsB",
+          "proofValue": "z45zhg2R7wMsaXpP8HKyFejyJ5q1erk8d8F1Jg2yUSQ2fUZMmecQZKMKvFyabZNpX3wTRQtEQ5A2bTc8F1M68jRxJ",
+          "type": "DataIntegrityProof",
+          "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m0"
+        }
+      ],
+      "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
+      "seq": 3,
+      "unlink": "d2"
+    },
+    {
+      "format": "coasys/1",
+      "op": "revoke",
+      "prev": "QmUBeDyY2Rfichm5UPJTfFyLUjF42quxwEJTBLX5rRtXCv",
+      "proof": [
+        {
+          "cryptosuite": "eddsa-jcs-2022",
+          "domain": "coasys:kel",
+          "proofPurpose": "assertionMethod",
+          "proofValue": "z3xUiRtGCaym3hst4uGbW6CQyAeUMDDsTG6hB72W9tZAoFhcBkvzmopCaAGdXjBq69WYnZxm7DYPU3sVakzNQJD2Z",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m0"
         }
@@ -537,20 +613,21 @@
         "d2"
       ],
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 3
+      "seq": 4,
+      "since": 1700000000000
     },
     {
       "format": "coasys/1",
       "master": "z6Mko91TaXkMdgzgpaQXWcwqQJCYz6rHsopLB4fScGjwWhQK",
       "next": "QmVvFnLYvMzZ2XJuoBvyZsqt9qn6hZo4MUTMC8Fj9aHJXd",
       "op": "rotate",
-      "prev": "Qmc4VKEGNbhSGEogtEMEHP38fWHrfQo2tRys5AwPKfP9UU",
+      "prev": "QmbYd7W38d96vENnmnLevdBMM1NAcT3r8huXXNpDK6fKQG",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z3GyVVUsHhtebpYsHYFYHTPdyLMcNnv2Y7jPqCxHorWBuneXxJbbi4poKsP8YesCuzcQsuqWfV9t44SzTk8dR1o2W",
+          "proofValue": "zEGYYKRDxG8EtLyQMts8oWuuF1ugjr7kGadyb5AnnTzJ8xL5HHsGo8aRA91eX71eWyijbByxbSumda6cs4tZVyvg",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
@@ -560,7 +637,7 @@
       ],
       "salt": "7DqbanfBGH8JLz4xeScbj2",
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 4
+      "seq": 5
     },
     {
       "add": [
@@ -574,45 +651,45 @@
       "format": "coasys/1",
       "offer": "offer-1",
       "op": "add",
-      "prev": "QmdLnz6wErfLi1KgfPjmkw3hfLWWhFFGJDT4CbVfq7AP2v",
+      "prev": "QmbuZW5E3NQh8KUpN1H4Neu9ByUX1EdbMgetSEoK9f4U4c",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "z4PknqHEvDhexYoMafxLKUgVYpQit8A5iPeCGCTkkkUtVVNzvPAqh3CYHfA3SbTk76L8zuTDncKqU8hRPJy2pamCe",
+          "proofValue": "z3mvpMFSLMGW6L48VKocvmXVte5Bk2fV5P1U9ebMiLdGKVSz5jmh19aohLmDBEN5Zqdz6c8FDgsURbNK2Q1mGeo4b",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m1"
         }
       ],
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 5
+      "seq": 6
     },
     {
       "format": "coasys/1",
       "master": "z6MkiHTZ9xT973Yj5KJCXbHKw8j7XyzYYEW5BZTmzppkKEoP",
       "next": null,
       "op": "rotate",
-      "prev": "QmSTq2YGAFQWbN3xwABNq3fTq58NCvrW9pwxFiRbptjynW",
+      "prev": "QmNkRHSG48baLHguazUAn4QcAeJCkTkp1Kodj92pAiTL51",
       "proof": [
         {
           "cryptosuite": "eddsa-jcs-2022",
           "domain": "coasys:kel",
           "proofPurpose": "assertionMethod",
-          "proofValue": "zbYhsNr4fkCLJskFJ3TMUyfqJdJjxChNu6vtEhu585yY5UHvic7t5PrffugTVzeV3gaTW1pguEufg68ZtqwX3Vxx",
+          "proofValue": "zJx5knjk2Ay3uqb8XoJ7dHmJ8tE5XXyUsPtSHr6ZqUwC64kGEXvmpnCAyF7WgFmWS9Vk883niymSVXPJPua8shxE",
           "type": "DataIntegrityProof",
           "verificationMethod": "did:scid:coasys:1:QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c#m2"
         }
       ],
       "salt": "RAGdryeF4Mik4njDvU79Wb",
       "scid": "QmRr6vq8rZSbrmxT9tpkFVuB3j4zt4vZTuJWMRbRNCPi2c",
-      "seq": 6
+      "seq": 7
     }
   ],
   "refused": [
     {
       "error": "VersionPastHead",
-      "version": 7
+      "version": 8
     }
   ]
 }

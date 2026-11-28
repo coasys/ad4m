@@ -7,7 +7,10 @@
 //!   `d1`, the executor's co-signature, publish, then the vault keeps master #0.
 //! - [`flows::link`]: an offer signed by the current master key, the offer link, the claim,
 //!   the match code both sides show, and the `add` that spends the claim.
-//! - [`flows::revoke`]: a `revoke` signed by the current master key, published.
+//! - [`flows::revoke`]: a `revoke` signed by the current master key, published; with an
+//!   optional `since` for a lost or stolen key.
+//! - [`flows::unlink`]: an `unlink` signed by the key itself (it then destroys the key) or by
+//!   the current master key.
 //!
 //! No custody key: no service keeps a copy of a master key for the person. The library has no
 //! clock, randomness or network of its own: [`Clock`], [`Random`] and [`executor::ExecutorRpc`]

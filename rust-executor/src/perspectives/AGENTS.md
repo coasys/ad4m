@@ -167,7 +167,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   instead of finishing a catalogue or receipt-index scan nobody waits on. Receipt verification
   (`valid_outputs`, `produced_by_flow`, `first_produced_at`) takes the stop too and ends at the
   next receipt once it fires, leaving a partial result, so `flow_valid_outputs_reading` returns
-  the stop error right after `valid_outputs` instead of a partial list. Callers with no
+  the stop error right after `valid_outputs` instead of a partial list. The carried signers'
+  key-index and log reads (`prepare_receipt_signers`) race the stop through `EvalStop::race`
+  (polled every 25 ms): a stalled store ends the run at the stop, not when it answers. Callers with no
   eval bound (flow passes, role gates, `flow_valid_outputs`, `mint_flow_receipt`,
   `verify_flow_receipt`) pass `EvalStop::none()`.
 - `SparqlStore` bumps a write generation after every committed write (`write_generation`,

@@ -191,6 +191,7 @@ async fn add_matching_link(perspective: &mut PerspectiveInstance) {
                 proof: ExpressionProof {
                     key: "test-key".to_string(),
                     signature: "test-signature".to_string(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Local),
             },

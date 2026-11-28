@@ -20,16 +20,21 @@ pub mod resolver;
 pub mod service;
 pub mod src_fetch;
 pub mod types;
+pub mod unlink;
+pub mod verdict;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::api::ws_handler::WsRpcError;
 use crate::events::{Audience, Event, Topic};
+use crate::types::{Expression, LinkExpression};
 use backend::AgentLanguageBackend;
 use cache::{CacheError, KelCache};
 pub use resolver::verify_expression;
-use resolver::Resolver;
+use resolver::{CheckedLink, Resolver};
 use service::IdentityService;
 use types::IdentityForkEvent;
 
@@ -231,10 +236,502 @@ pub fn init(db_path: &Path, settings: &IdentitySettings) -> Result<(), CacheErro
         store_keys_source: settings.store_keys_source,
         resolver: Arc::new(resolver),
     };
-    if SERVICE.set(Arc::new(service)).is_err() {
+    let service = Arc::new(service);
+    if SERVICE.set(service.clone()).is_err() {
         log::warn!("identity: the module was started twice; keeping the first");
+        return Ok(());
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // Subscribed here, so no change the cache fires before the task runs is lost.
+            let changes = service.cache.subscribe();
+            handle.spawn(run_recheck(service, changes));
+        }
+        Err(_) => log::error!("identity: no runtime for the re-check of links"),
     }
     Ok(())
+}
+
+/// How often links whose signer's log could not be read are checked again.
+pub const RECHECK_EVERY: Duration = Duration::from_secs(60);
+
+/// The re-check of stored links: the links of each key whose verdict the cache changed (a
+/// revocation, a key a log lists for the first time), and every [`RECHECK_EVERY`] the links
+/// that could not be checked, and those of each bot key whose scope expired since the last tick
+/// (since start on the first). When the receiver lags, the changes it missed are made up
+/// for by [`lag_scopes`], which sweeps the marks the cache journaled as well as the key
+/// map, so a lost change of a log the map's bound dropped is found anyway. Each re-check
+/// judges a link again from the key map and rewrites it only when its verdict or person
+/// changed, so it is idempotent.
+async fn run_recheck(
+    service: Arc<IdentityService>,
+    mut changes: tokio::sync::broadcast::Receiver<verdict::VerdictChange>,
+) {
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    // The stored links are there to re-judge once the perspectives are open. Every log the
+    // cache holds is read into the key map then: each key that no longer counts fires a change
+    // (a log the map did not hold), so a link stored `valid` by a bot whose scope expired, or
+    // a device revoked, while this executor was down is re-judged though its log may never be
+    // read again otherwise.
+    crate::perspectives::opened().await;
+    match service.cache.load_held().await {
+        Ok(read) => log::debug!("identity: read {read} key logs for the re-check"),
+        Err(e) => log::warn!("identity: could not list the cached key logs: {e}"),
+    }
+    // A key a log ended while this executor was down (or whose change was lost) is removed from
+    // the wallet now.
+    tokio::spawn({
+        let cache = service.cache.clone();
+        async move { unlink::sweep_dead_keys(&cache).await }
+    });
+    let mut tick = tokio::time::interval(RECHECK_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut expired_until = 0;
+    // The id of the last journaled mark a lag recovery already swept ([`lag_scopes`]).
+    let mut marks_swept = 0;
+    // Signers whose re-check failed in some perspective: asked again on the next tick.
+    let mut failed: BTreeSet<String> = BTreeSet::new();
+    // A lag recovery's sweep of the links stored with a person failed somewhere: run again on
+    // the next tick.
+    let mut logged_failed = false;
+    loop {
+        tokio::select! {
+            change = changes.recv() => {
+                let mut signers = BTreeSet::new();
+                let mut lagged = false;
+                match change {
+                    Ok(change) => {
+                        unlink::end_sessions_of(&change);
+                        signers.insert(format!("did:key:{}", change.key));
+                        loop {
+                            match changes.try_recv() {
+                                Ok(change) => {
+                                    unlink::end_sessions_of(&change);
+                                    signers.insert(format!("did:key:{}", change.key));
+                                }
+                                Err(TryRecvError::Lagged(_)) => lagged = true,
+                                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+                            }
+                        }
+                    }
+                    Err(RecvError::Lagged(_)) => lagged = true,
+                    Err(RecvError::Closed) => return,
+                }
+                // A change the receiver lost may have ended a local agent's key: check every
+                // local agent against its own trusted log.
+                if lagged {
+                    tokio::spawn({
+                        let cache = service.cache.clone();
+                        async move { unlink::sweep_dead_keys(&cache).await }
+                    });
+                }
+                let scopes = if lagged {
+                    let (scopes, swept) =
+                        lag_scopes(&service.cache, signers, marks_swept).await;
+                    marks_swept = swept;
+                    retire_spent_marks(&service.cache, marks_swept, expired_until);
+                    scopes
+                } else {
+                    vec![crate::perspectives::Recheck::Signers(signers)]
+                };
+                for scope in scopes {
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        match scope {
+                            crate::perspectives::Recheck::Signers(signers) => {
+                                failed.extend(signers)
+                            }
+                            crate::perspectives::Recheck::Logged => logged_failed = true,
+                            crate::perspectives::Recheck::CantCheck => {}
+                        }
+                    }
+                }
+            }
+            _ = tick.tick() => {
+                let now = service::now();
+                let (mut signers, logs) =
+                    expired_signers(&service.cache, expired_until, now);
+                expired_until = now;
+                // A journaled scope may belong to a log the map's bound dropped: read it
+                // back, so the re-check judges the bot's links with it.
+                for scid in logs {
+                    if let Err(e) = service.cache.trusted(&scid).await {
+                        log::warn!(
+                            "identity: could not read the journaled log {scid} for the expiry re-check: {e}"
+                        );
+                    }
+                }
+                retire_spent_marks(&service.cache, marks_swept, expired_until);
+                signers.append(&mut failed);
+                if !signers.is_empty() {
+                    let scope = crate::perspectives::Recheck::Signers(signers);
+                    if !crate::perspectives::recheck_links(&scope).await {
+                        if let crate::perspectives::Recheck::Signers(signers) = scope {
+                            failed = signers;
+                        }
+                    }
+                }
+                if logged_failed {
+                    logged_failed =
+                        !crate::perspectives::recheck_links(&crate::perspectives::Recheck::Logged)
+                            .await;
+                }
+                crate::perspectives::recheck_links(&crate::perspectives::Recheck::CantCheck).await;
+            }
+        }
+    }
+}
+
+/// Deletes the journal rows both readers are past ([`KelCache::retire_marks`]): the
+/// change marks the lag recovery swept (`marks_swept`) and the scope marks the expiry tick
+/// read (`expired_until`). A failure only logs; the rows go with the next call.
+pub(crate) fn retire_spent_marks(cache: &KelCache, marks_swept: u64, expired_until: u64) {
+    if let Err(e) = cache.retire_marks(marks_swept, expired_until) {
+        log::warn!("identity: could not retire the spent journal marks: {e}");
+    }
+}
+
+/// The signers (`did:key`) of the bot keys whose scope expired in `(after, upto]` — the
+/// keys the key map still lists and those journaled under the cache's marks for a log the
+/// map has since dropped ([`KelCache::marked_expiring`]) — and the `scid`s of those
+/// journaled logs, for the caller to read back into the map before the re-check.
+pub(crate) fn expired_signers(
+    cache: &KelCache,
+    after: u64,
+    upto: u64,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut signers: BTreeSet<String> = cache::global_key_map()
+        .expiring(after, upto)
+        .into_iter()
+        .map(|key| format!("did:key:{key}"))
+        .collect();
+    let mut logs = BTreeSet::new();
+    match cache.marked_expiring(after, upto) {
+        Ok(marks) => marks.into_iter().for_each(|(key, scid)| {
+            signers.insert(format!("did:key:{key}"));
+            logs.insert(scid);
+        }),
+        Err(e) => log::warn!("identity: could not read the journaled scope expiries: {e}"),
+    }
+    (signers, logs)
+}
+
+/// The re-checks after the receiver lagged (changes were missed): the links of `signers`
+/// (the changes it did receive), of every key the map lists, and of every key journaled
+/// past the mark `since` ([`KelCache::marked_since`]) — a lost change may belong to a log
+/// the map's bound dropped (a start-up load past the bound overflows the change buffer
+/// too), and the marks still name its keys, so a link stored `valid` with no person is
+/// found whether or not the log is still held. The journaled logs are read back into the
+/// map first, so the links are judged with them. Then every link stored with a person: a
+/// stored person names the log, which the re-check reads back from the cache
+/// ([`read_logs_of`]). The id answered beside the scopes is where the next sweep starts.
+pub(crate) async fn lag_scopes(
+    cache: &KelCache,
+    mut signers: BTreeSet<String>,
+    since: u64,
+) -> (Vec<crate::perspectives::Recheck>, u64) {
+    signers.extend(
+        cache::global_key_map()
+            .listed_keys()
+            .into_iter()
+            .map(|key| format!("did:key:{key}")),
+    );
+    // The head is read before the marks: a mark written while this sweep runs lies above
+    // it, so the next sweep reads it and `retire_marks` never deletes it unread.
+    let swept = cache.last_mark().unwrap_or_else(|e| {
+        log::warn!("identity: could not read the change journal's head: {e}");
+        since
+    });
+    match cache.marked_since(since) {
+        Ok(marks) => {
+            let mut logs = BTreeSet::new();
+            for (key, scid) in &marks {
+                signers.insert(format!("did:key:{key}"));
+                logs.insert(scid.clone());
+            }
+            for scid in logs {
+                if let Err(e) = cache.trusted(&scid).await {
+                    log::warn!(
+                        "identity: could not read the journaled log {scid} for the lag recovery: {e}"
+                    );
+                }
+            }
+        }
+        Err(e) => log::warn!("identity: could not read the journaled key changes: {e}"),
+    }
+    (
+        vec![
+            crate::perspectives::Recheck::Signers(signers),
+            crate::perspectives::Recheck::Logged,
+        ],
+        swept,
+    )
+}
+
+/// The verdict of a signed expression (a link) and its person, from the executor's key map,
+/// with no I/O ([`resolver::check_signed_with`]). No space order is known here: a link by a
+/// key revoked after its anchor is `flagged` ([`check_signed_entered`] for the one order the
+/// executor does know).
+pub fn check_signed<T: serde::Serialize>(expr: &Expression<T>) -> CheckedLink {
+    resolver::check_signed_with(expr, &cache::global_key_map(), None, service::now())
+}
+
+/// [`check_signed`] with what the caller knows of the order: `Some(false)` for a link this
+/// executor held as `valid` before the signer's revocation reached its key map (the link store
+/// at a re-judgement), `Some(true)` for one that arrived after, `None` when nothing is known.
+/// `received_at`: when this executor first received the statement the link's proof signs (unix
+/// ms), from the link store's receipt of that key and signature; a revoke's `since` reads it.
+pub fn check_signed_entered<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
+) -> CheckedLink {
+    resolver::check_signed_with_provenance(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        received_at,
+        service::now(),
+        |_| false,
+    )
+}
+
+/// [`check_signed_entered`] for the bulk import ([`resolver::check_signed_import_with`]): the
+/// import fetches no log, so a signer the key map does not know leaves its unanchored link
+/// `cantCheck` for the periodic re-check, not `valid`.
+pub fn check_signed_import<T: serde::Serialize>(
+    expr: &Expression<T>,
+    received_at: Option<u64>,
+) -> CheckedLink {
+    resolver::check_signed_import_with(expr, &cache::global_key_map(), received_at, service::now())
+}
+
+/// [`check_signed_entered`] for a link this executor signs during the call that writes it —
+/// the paths that create the proof (`perspective.addLink`, `perspective.addLinks`,
+/// `perspective.linkMutations`, `perspective.updateLink`, a `commitBatch`, and every write
+/// through them). A link one of this executor's own agents signed ([`is_local_agent`]) needs
+/// no head the store confirmed within the window, since no revocation this executor has not
+/// seen can be at stake for a link it signs now. A link a caller hands in already signed
+/// (`perspective.addLinkExpression`, `import_perspective`, a store rebuild) is checked as one
+/// from a peer, whichever key signed it — the exemption is the write's, not the key's: the
+/// same key, copied and revoked, may have signed it elsewhere.
+pub fn check_signed_own<T: serde::Serialize>(
+    expr: &Expression<T>,
+    entered_after_revoke: Option<bool>,
+    received_at: Option<u64>,
+) -> CheckedLink {
+    resolver::check_signed_with_provenance(
+        expr,
+        &cache::global_key_map(),
+        entered_after_revoke,
+        received_at,
+        service::now(),
+        is_local_agent,
+    )
+}
+
+/// Whether `did` is one of this executor's agents: the main agent, or a managed user's. Reads
+/// no lock that panics: before the agent service or the database opens, `false`.
+pub(crate) fn is_local_agent(did: &str) -> bool {
+    let main = crate::agent::AgentService::global_instance()
+        .lock()
+        .ok()
+        .and_then(|agent| agent.as_ref().and_then(|agent| agent.did.clone()));
+    main.as_deref() == Some(did)
+        || crate::db_backend::db_backend()
+            .get_username_by_did(did)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+/// Puts the trusted logs of `people` (the persons stored links carry) back into the key map
+/// where its bound dropped them ([`Resolver::read_logs`]), before those links are judged again.
+/// `Err` when a log the cache holds could not be read: the links it names are judged without
+/// it, so the caller's re-check is incomplete and runs again.
+pub async fn read_logs_of(people: &[&str]) -> Result<(), String> {
+    if people.is_empty() {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        return resolver.read_logs(people).await;
+    }
+    let Some(service) = SERVICE.get() else {
+        return Ok(());
+    };
+    service.resolver.read_logs(people).await
+}
+
+/// Fills the key map for the signers of `links` before they are checked and stored: the key
+/// index and the logs it names, through the agent language. Does nothing before [`init`].
+/// A listed signer's log is also refreshed when the store last confirmed its head more than
+/// [`resolver::ADMIT_FRESHNESS`] ago, which is what the receipt paths lean on before they
+/// re-judge carried links under the same window a live write is admitted under.
+///
+/// Keep the returned hold until `links` are judged: while it lives a signer the prepare got no
+/// answer for is pending ([`cache::KeyMap::hold`]), so its link is `CantCheck`, however long
+/// the prepare took.
+pub async fn prepare_link_signers(links: &[LinkExpression]) -> cache::PendingHold {
+    #[cfg(test)]
+    if let Ok(resolver) = TEST_RESOLVER.try_with(Arc::clone) {
+        return resolver.prepare(&signers_to_prepare(links)).await;
+    }
+    let Some(service) = SERVICE.get() else {
+        return cache::PendingHold::none();
+    };
+    service.resolver.prepare(&signers_to_prepare(links)).await
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Test-only: the resolver [`prepare_link_signers`] uses inside [`with_test_resolver`],
+    /// in place of the one [`init`] puts in [`SERVICE`]. Scoped to one test's task, so a test
+    /// can drive an entry point through the prepare step on a fake store without setting the
+    /// process-wide `SERVICE` (a `OnceLock`) under every other test in the binary.
+    static TEST_RESOLVER: Arc<Resolver>;
+}
+
+/// Test-only: runs `fut` with `resolver` standing in for the started module's resolver in
+/// [`prepare_link_signers`].
+#[cfg(test)]
+pub(crate) async fn with_test_resolver<F: std::future::Future>(
+    resolver: Arc<Resolver>,
+    fut: F,
+) -> F::Output {
+    TEST_RESOLVER.scope(resolver, fut).await
+}
+
+/// The `(did:key, anchor)` pairs of `links` worth asking the key index about: those whose
+/// signature holds for their own `author`. A link whose signature fails is `invalid` whatever
+/// any log says ([`verdict::judge`]), so a peer sending well-formed DIDs with bad signatures
+/// costs no lookup; the signature check is local.
+pub(crate) fn signers_to_prepare(links: &[LinkExpression]) -> Vec<(String, Option<u64>)> {
+    links
+        .iter()
+        .filter(|l| {
+            // The same bytes `LinkExpression::check` verifies: the normalised data.
+            let expr = Expression::<crate::types::Link> {
+                author: l.author.clone(),
+                timestamp: l.timestamp.clone(),
+                data: l.data.normalize(),
+                proof: l.proof.clone(),
+            };
+            crate::agent::signatures::signature_holds(&expr)
+        })
+        .map(|l| (l.author.clone(), l.proof.anchor))
+        .collect()
+}
+
+#[cfg(test)]
+mod prepare_tests {
+    use super::signers_to_prepare;
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link, LinkExpression};
+
+    /// A peer floods a diff with well-formed `did:key` authors and empty or wrong signatures:
+    /// none of them reaches the key index. Only a link that verifies against its author does.
+    #[test]
+    fn only_a_link_whose_signature_holds_is_prepared() {
+        let link = |n: u32| Link {
+            source: "a".into(),
+            predicate: Some("p".into()),
+            target: format!("t{n}"),
+        };
+        let signed: LinkExpression = TestSigner::generate().sign(link(0)).into();
+        let mut unsigned: LinkExpression = TestSigner::generate().sign(link(1)).into();
+        unsigned.proof.signature = String::new();
+        let mut forged: LinkExpression = TestSigner::generate().sign(link(2)).into();
+        forged.author = TestSigner::generate().did;
+        let mut re_anchored: LinkExpression = TestSigner::generate().sign(link(3)).into();
+        re_anchored.proof.anchor = Some(4);
+        assert_eq!(
+            signers_to_prepare(&[signed.clone(), unsigned, forged, re_anchored]),
+            vec![(signed.author, None)]
+        );
+    }
+}
+
+/// The anchor of a link that the local agent `agent_did` signs now: the trusted seq of its
+/// identity's log, when the agent is bound to an identity (`identity_agents`) and that log
+/// lists its key as a device key up to that seq. `None` otherwise: the link carries no anchor.
+///
+/// Read from the key map, with no I/O: the logs of local identities are loaded at start
+/// ([`load_local_identities`]) and never leave the map, and each accepted head replaces its
+/// log there, so a link signed after a newer head is accepted carries the new anchor.
+pub fn anchor_for(agent_did: &str) -> Option<u64> {
+    let service = SERVICE.get()?;
+    let scid = crate::db_backend::db_backend()
+        .agent_identity(agent_did)
+        .ok()
+        .flatten()?;
+    anchor_in(service.cache.key_map(), agent_did, &scid)
+}
+
+/// [`anchor_for`] of `agent_did` bound to `scid`, from `key_map`.
+fn anchor_in(key_map: &cache::KeyMap, agent_did: &str, scid: &str) -> Option<u64> {
+    let log = key_map.log(scid)?;
+    let key = resolver::multikey_of(agent_did)?;
+    let id = log.state.device_key_id_of(&key.to_string())?;
+    log.state
+        .keys
+        .get(id)
+        .is_some_and(|r| r.added <= log.trusted)
+        .then_some(log.trusted)
+}
+
+/// Loads the trusted log of every identity a local agent speaks for into the key map and pins
+/// it there ([`KelCache::keep_local`]), so [`anchor_for`] knows it from the first link. Called
+/// once at startup, after [`init`] and before the API and the perspectives start. A log that
+/// cannot be read is logged and skipped: links then carry no anchor until its next accepted
+/// head.
+pub async fn load_local_identities() {
+    let Some(service) = SERVICE.get() else {
+        return;
+    };
+    let scids = match crate::db_backend::db_backend().local_identities() {
+        Ok(scids) => scids,
+        Err(e) => {
+            log::warn!("identity: could not read the local identities: {e}");
+            return;
+        }
+    };
+    keep_local_all(&service.cache, &scids).await;
+    // The keys whose unlink is pending stay fenced from the first signature, then the unlink is
+    // finished (when the wallet is still locked, at its unlock).
+    match crate::db_backend::db_backend().unlink_intents() {
+        Ok(intents) => {
+            crate::agent::fence::load(intents.into_iter().map(|(did, _)| did));
+        }
+        Err(e) => log::warn!("identity: could not read the pending unlinks: {e}"),
+    }
+    resume_pending_unlinks();
+}
+
+/// Finishes the pending unlinks of this executor's agents on their own task (see
+/// [`IdentityService::resume_pending`]). Called at start and when the wallet unlocks; does
+/// nothing without a runtime or an identity module.
+pub fn resume_pending_unlinks() {
+    let (Some(service), Ok(handle)) = (
+        SERVICE.get().cloned(),
+        tokio::runtime::Handle::try_current(),
+    ) else {
+        return;
+    };
+    handle.spawn(async move { service.resume_pending().await });
+}
+
+async fn keep_local_all(cache: &KelCache, scids: &[String]) {
+    for scid in scids {
+        match cache.keep_local(scid).await {
+            Ok(true) => {}
+            Ok(false) => log::warn!(
+                "identity: no trusted log of the local identity {scid} yet; its links carry no anchor until its next accepted head"
+            ),
+            Err(e) => log::warn!(
+                "identity: the log of the local identity {scid} is unreadable ({e}); its links carry no anchor until its next accepted head"
+            ),
+        }
+    }
 }
 
 /// The module, once [`init`] ran.
@@ -363,6 +860,298 @@ pub fn settings_from_config() -> IdentitySettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ad4m_identity_core::build::Signer;
+    use cache::tests::{accept_signed, on_file, store_key, trusting, TestLog};
+
+    fn agent_of(log: &TestLog) -> String {
+        format!("did:key:{}", log.device.key())
+    }
+
+    /// Adds a second device key to `log` at the next seq; the agent's d1 stays.
+    fn add_device(log: &mut TestLog, seed: u8) {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[seed; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 4_000_000_000,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+    }
+
+    /// The tick re-checks the links of each bot key whose scope expired since the last tick:
+    /// once, and never a key without a scope or one whose scope has not expired. The marks
+    /// the cache journaled answer the same after the key map dropped the log.
+    #[tokio::test]
+    async fn the_tick_rechecks_the_bot_keys_whose_scope_expired_since_the_last_one() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let mut log = TestLog::new(64);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[66; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[66; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1_500,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let person = TestLog::new(65);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        accept_signed(&cache, &person.events).await;
+        let bot_signer = BTreeSet::from([format!("did:key:{}", bot.key())]);
+        assert!(
+            expired_signers(&cache, 0, 1_000).0.is_empty(),
+            "not expired yet"
+        );
+        assert_eq!(expired_signers(&cache, 1_000, 2_000).0, bot_signer);
+        assert!(
+            expired_signers(&cache, 2_000, 3_000).0.is_empty(),
+            "already rechecked"
+        );
+        assert_eq!(
+            expired_signers(&cache, 0, 3_000).0,
+            bot_signer,
+            "after a restart"
+        );
+        // The journaled mark still answers after the key map dropped the log, and names
+        // the log to read back.
+        cache.key_map().forget(&log.scid());
+        let (signers, logs) = expired_signers(&cache, 0, 3_000);
+        assert_eq!(signers, bot_signer, "the map forgot the log");
+        assert_eq!(logs, BTreeSet::from([log.scid()]));
+    }
+
+    /// After the receiver lags, the journaled marks name every key whose verdict changed —
+    /// including of a log the key map's bound dropped before the recovery — so the re-check
+    /// finds its stored links though none carries a person ([`lag_scopes`]).
+    #[tokio::test]
+    async fn the_lag_recovery_sweeps_the_journaled_keys_the_map_dropped() {
+        let mut log = TestLog::new(70);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let signer = agent_of(&log);
+        // The bound evicts the log before the recovery runs.
+        cache.key_map().forget(&log.scid());
+        let (scopes, swept) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        let signers = scopes
+            .iter()
+            .find_map(|scope| match scope {
+                crate::perspectives::Recheck::Signers(signers) => Some(signers),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            signers.contains(&signer),
+            "the journaled mark names the revoked key"
+        );
+        // Marks at or before `swept` are not swept again.
+        assert!(
+            cache.marked_since(swept).unwrap().is_empty(),
+            "already swept"
+        );
+    }
+
+    /// A key reported changed twice (a second head, or the log evicted and read back while
+    /// the key stays revoked) leaves one journal row, not one per report.
+    #[tokio::test]
+    async fn a_repeated_mark_of_a_key_leaves_one_row() {
+        let mut log = TestLog::new(80);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let key = log.device.key().to_string();
+        let rows_of_key = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.1 == key && r.3.is_none())
+                .count()
+        };
+        assert_eq!(rows_of_key(&cache), 1, "one row for the revocation");
+        // Evicted and read back: the load reports the revoked key again.
+        for _ in 0..2 {
+            cache.key_map().forget(&log.scid());
+            cache.trusted(&log.scid()).await.unwrap();
+        }
+        assert_eq!(
+            rows_of_key(&cache),
+            1,
+            "the reload marks it again: no new row"
+        );
+    }
+
+    /// Change marks go once the lag sweep passed them, scope marks once the tick read their
+    /// expiry; `marked_expiring` answers exactly the due rows until then.
+    #[tokio::test]
+    async fn spent_marks_are_retired_and_the_rest_kept() {
+        use ad4m_identity_core::build::{add_unsigned, cosign};
+        use ad4m_identity_core::{BotScope, DeviceKey, KeyLife};
+        let mut log = TestLog::new(81);
+        let bot = ed25519_dalek::SigningKey::from_bytes(&[82; 32]);
+        let chain = log.chain();
+        let device = DeviceKey {
+            id: chain.state().next_device_id(),
+            sign: bot.key(),
+            enc: ad4m_identity_core::encode_x25519_multikey(&[82; 32]),
+            life: KeyLife::Bot(BotScope {
+                can: vec!["read".into()],
+                expires: 1_500,
+            }),
+        };
+        let mut event = add_unsigned(&chain, device, "offer", "co-sig").unwrap();
+        cosign(&mut event, "m0", &log.master).unwrap();
+        log.events.push(event);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        log.revoke_d1();
+        accept_signed(&cache, &log.events).await;
+        let bot_key = bot.key().to_string();
+        let scope_rows = |cache: &KelCache| {
+            cache
+                .mark_rows()
+                .into_iter()
+                .filter(|r| r.3.is_some())
+                .count()
+        };
+        assert_eq!(scope_rows(&cache), 1);
+        let changes = cache
+            .mark_rows()
+            .into_iter()
+            .filter(|r| r.3.is_none())
+            .count();
+        assert!(changes > 0, "the revocation is journaled");
+
+        // marked_expiring answers exactly the due rows.
+        assert!(cache.marked_expiring(0, 1_499).unwrap().is_empty());
+        assert_eq!(
+            cache.marked_expiring(1_000, 2_000).unwrap(),
+            vec![(bot_key.clone(), log.scid())]
+        );
+        assert!(cache.marked_expiring(1_500, 2_000).unwrap().is_empty());
+
+        // The tick has not reached the expiry and no sweep ran: nothing goes.
+        assert_eq!(cache.retire_marks(0, 1_000).unwrap(), 0);
+        assert_eq!(cache.mark_rows().len(), changes + 1);
+        // The tick passed the expiry: the scope row goes, the change rows stay.
+        assert_eq!(cache.retire_marks(0, 1_500).unwrap(), 1);
+        assert_eq!(scope_rows(&cache), 0);
+        assert!(cache.marked_expiring(0, 3_000).unwrap().is_empty());
+        assert_eq!(cache.mark_rows().len(), changes);
+        // A sweep passed them: the change rows go; the journal is empty.
+        let (_, swept) = lag_scopes(&cache, BTreeSet::new(), 0).await;
+        retire_spent_marks(&cache, swept, 1_500);
+        assert!(cache.mark_rows().is_empty());
+        // A later change is journaled afresh and found past the sweep's mark.
+        cache.key_map().forget(&log.scid());
+        cache.trusted(&log.scid()).await.unwrap();
+        assert!(!cache.marked_since(swept).unwrap().is_empty());
+    }
+
+    /// A journal an earlier release wrote, with the same NULL-expiry mark many times, is
+    /// collapsed when the cache opens; the newest id of each mark stays, scope rows stay.
+    #[tokio::test]
+    async fn the_migration_collapses_duplicate_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        {
+            let old = rusqlite::Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE identity_key_marks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    multikey TEXT NOT NULL,
+                    scid TEXT NOT NULL,
+                    expires INTEGER,
+                    UNIQUE (multikey, scid, expires)
+                );
+                INSERT INTO identity_key_marks (multikey, scid, expires) VALUES
+                    ('k1', 's1', NULL), ('k2', 's1', NULL), ('k1', 's1', NULL),
+                    ('k1', 's1', 900), ('k1', 's1', NULL), ('k1', 's2', NULL);",
+            )
+            .unwrap();
+        }
+        let cache = on_file(&path, vec![store_key().multikey()]);
+        let rows = cache.mark_rows();
+        let key = |r: &(i64, String, String, Option<i64>)| (r.1.clone(), r.2.clone(), r.3);
+        assert_eq!(
+            rows.iter().map(key).collect::<Vec<_>>(),
+            vec![
+                ("k2".into(), "s1".into(), None),
+                ("k1".into(), "s1".into(), Some(900)),
+                ("k1".into(), "s1".into(), None),
+                ("k1".into(), "s2".into(), None),
+            ]
+        );
+        assert_eq!(rows[2].0, 5, "the newest duplicate stays");
+    }
+
+    /// The anchor of a bound agent is its log's trusted seq, read from the key map with no
+    /// `await`; after a newer head is accepted, a link signed then carries the new seq.
+    #[tokio::test]
+    async fn the_anchor_is_the_trusted_seq_and_follows_a_newer_head() {
+        let mut log = TestLog::new(61);
+        let cache = trusting();
+        let agent = agent_of(&log);
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), None);
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+
+        add_device(&mut log, 62);
+        // Events with no store head move nothing.
+        cache.ingest(&log.scid(), &log.events[1..]).await.unwrap();
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+        accept_signed(&cache, &log.events).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(1));
+    }
+
+    /// A key the log lists only as its master, or not at all, signs with no anchor.
+    #[tokio::test]
+    async fn only_a_listed_device_key_gets_an_anchor() {
+        let log = TestLog::new(63);
+        let cache = trusting();
+        accept_signed(&cache, &log.events).await;
+        let master = format!("did:key:{}", log.master.key());
+        assert_eq!(anchor_in(cache.key_map(), &master, &log.scid()), None);
+        let stranger = format!("did:key:{}", TestLog::new(64).device.key());
+        assert_eq!(anchor_in(cache.key_map(), &stranger, &log.scid()), None);
+    }
+
+    /// After a restart the key map is empty; the startup load puts every local identity's
+    /// trusted log there, so the anchor is known with no read by the signer. A log that cannot
+    /// be loaded is skipped.
+    #[tokio::test]
+    async fn the_startup_load_makes_the_anchor_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ad4m_db.sqlite");
+        let log = TestLog::new(65);
+        {
+            let cache = on_file(&path, vec![store_key().multikey()]);
+            accept_signed(&cache, &log.events).await;
+        }
+        let cache = on_file(&path, vec![store_key().multikey()]);
+        let agent = agent_of(&log);
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), None);
+        let unknown = TestLog::new(66).scid();
+        keep_local_all(&cache, &[unknown, log.scid()]).await;
+        assert_eq!(anchor_in(cache.key_map(), &agent, &log.scid()), Some(0));
+    }
 
     #[test]
     fn the_store_url_reaches_the_agent_languages_settings_and_keeps_the_others() {

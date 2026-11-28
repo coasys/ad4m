@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use chrono::Utc;
 use futures::future;
 use holochain::conductor::api::error::ConductorApiError;
-use holochain::sweettest::{SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetDnaFile};
+use holochain::sweettest::{
+    SweetAgents, SweetCell, SweetConductor, SweetConductorBatch, SweetConductorConfig, SweetDnaFile,
+};
 use holochain_types::prelude::*;
 use perspective_diff_sync_integrity::{
     CommitInput, ExpressionProof, LinkExpression, PerspectiveDiff, PullResult, Triple,
@@ -44,7 +46,11 @@ pub async fn setup_1_conductor() -> (SweetConductor, SweetCell) {
 /// Setup multiple conductors with agents, optionally networked together
 pub async fn setup_conductors(n: usize, network: bool) -> (SweetConductorBatch, Vec<SweetCell>) {
     let dna = load_dna().await;
-    let mut conductors = SweetConductorBatch::standard(n).await;
+    // Without `network` the conductors skip bootstrap, so they meet only through
+    // `exchange_peer_info`.
+    let mut conductors =
+        SweetConductorBatch::from_config_rendezvous(n, SweetConductorConfig::rendezvous(network))
+            .await;
 
     let agents: Vec<AgentPubKey> = future::join_all(
         conductors.iter().map(|c| async {
@@ -81,6 +87,7 @@ pub fn generate_link_expression(author: &str) -> LinkExpression {
         proof: ExpressionProof {
             signature: format!("sig_{}", Uuid::new_v4()),
             key: format!("key_{}", author),
+            anchor: None,
         },
     }
 }

@@ -189,6 +189,7 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
                 proof: crate::types::ExpressionProof {
                     key: format!("{me}#key"),
                     signature: "not-a-signature".to_string(),
+                    anchor: None,
                 },
                 status: Some(LinkStatus::Shared),
             },

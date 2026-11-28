@@ -310,6 +310,7 @@ dependencies = [
 name = "ad4m-ldk"
 version = "0.13.0-test-1"
 dependencies = [
+ "ad4m-model-derive",
  "futures",
  "js-sys",
  "serde",
@@ -317,6 +318,15 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "ad4m-model-derive"
+version = "0.13.0-test-1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

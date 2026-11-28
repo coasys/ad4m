@@ -29,6 +29,12 @@ pub fn retired_key_name(did: &str) -> String {
     format!("retired-main:{did}")
 }
 
+/// The wallet name of the managed agent's key `did` once its device unlinked itself
+/// (`identity.unlinkSelf`).
+pub fn retired_managed_key_name(did: &str) -> String {
+    format!("retired-agent:{did}")
+}
+
 /// Retires the main key `old_did` and makes a new `main` key. When the new key cannot be made,
 /// the old key is `main` again.
 fn replace_main_key(backend: &dyn WalletBackend, old_did: &str) -> Result<(), AnyError> {
@@ -51,6 +57,74 @@ fn put_old_main_key_back(backend: &dyn WalletBackend, old_did: &str) -> Result<(
 }
 
 impl AgentService {
+    /// Takes the key of the managed agent `did` out of use: it moves to its retired name
+    /// ([`retired_managed_key_name`]), so nothing signs with it again, and the agent file is
+    /// saved. When the file cannot be saved, the key is back. Needs an unlocked agent whose
+    /// passphrase is in memory and a wallet that can rename keys.
+    pub fn retire_managed_key(&self, did: &str) -> Result<(), AnyError> {
+        self.signing_checks()?;
+        let passphrase = self.passphrase.clone().ok_or_else(|| {
+            anyhow!("the agent's passphrase is not in memory: unlock the agent first")
+        })?;
+        let backend = wallet_backend();
+        if !backend.can_rename_keys() {
+            return Err(anyhow!("this wallet backend cannot keep a retired key"));
+        }
+        let name = Self::wallet_key_for_did(did)?;
+        let retired = retired_managed_key_name(did);
+        backend.retire_key(&name, &retired)?;
+        super::forget_managed_key_names();
+        if let Err(e) = self.try_save(&passphrase) {
+            backend.retire_key(&retired, &name)?;
+            super::forget_managed_key_names();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Deletes the secret of the retired key `did` (a retired managed agent's key, or a retired
+    /// main key), keeping its public key under the retired name, and saves the agent file, so
+    /// the keystore on disk holds no secret of it. Nothing is left to do when the wallet has no
+    /// retired key of `did`, or one without a secret. When the save fails the error is
+    /// returned: the secret is gone from memory but the file may still hold it, and the
+    /// caller tries again. Needs an unlocked agent whose passphrase is in memory.
+    pub fn destroy_retired_key(&self, did: &str) -> Result<(), AnyError> {
+        self.signing_checks()?;
+        let passphrase = self.passphrase.clone().ok_or_else(|| {
+            anyhow!("the agent's passphrase is not in memory: unlock the agent first")
+        })?;
+        let backend = wallet_backend();
+        for name in [retired_managed_key_name(did), retired_key_name(did)] {
+            if backend.key_exists(&name) {
+                backend.destroy_secret(&name)?;
+            }
+        }
+        super::forget_managed_key_names();
+        self.try_save(&passphrase)?;
+        self.remove_legacy_backup()
+    }
+
+    /// Removes the copy of the agent file that the first unlock of a legacy keystore made
+    /// (`legacy_backup_file`): it holds every secret the wallet held then, including the one just
+    /// destroyed. The backup only serves a passphrase fallback (the legacy key saw 24 bytes of the
+    /// passphrase), and the save above bound the agent file to the passphrase in memory, which is
+    /// what `unlock` does before it removes the backup itself, so nothing is lost but the copy.
+    /// A missing file is fine; any other failure is returned, so the caller does not treat the
+    /// secret as gone.
+    fn remove_legacy_backup(&self) -> Result<(), AnyError> {
+        match std::fs::remove_file(self.legacy_backup_file()) {
+            Ok(()) => {
+                log::info!("🔑 Removed the legacy keystore backup: it held a destroyed secret.");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(anyhow!(
+                "could not remove the legacy keystore backup {}: {e}",
+                self.legacy_backup_file()
+            )),
+        }
+    }
+
     /// Gives the main agent a new wallet key and keeps the old one under its retired name.
     /// Moves this service's own copies of the DID: the DID, its document, the signing key id
     /// and the profile (the profile's DID; its links stay as signed), and saves the agent
@@ -156,6 +230,9 @@ pub(crate) mod tests {
         }
         fn retire_key(&self, name: &str, retired_name: &str) -> Result<(), AnyError> {
             self.inner.retire_key(name, retired_name)
+        }
+        fn destroy_secret(&self, name: &str) -> Result<(), AnyError> {
+            self.inner.destroy_secret(name)
         }
     }
 

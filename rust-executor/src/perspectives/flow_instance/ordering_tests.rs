@@ -38,11 +38,13 @@ fn votes_order_by_instant_not_by_string() {
         vec![
             Vote {
                 did: BOB.into(),
-                at: WHOLE_SECOND.into()
+                at: WHOLE_SECOND.into(),
+                voter: None,
             },
             Vote {
                 did: ALICE.into(),
-                at: POINT_ONE.into()
+                at: POINT_ONE.into(),
+                voter: None,
             },
         ],
         "the earlier instant is the earlier vote, whatever format its client wrote"
@@ -71,7 +73,8 @@ fn an_unparseable_vote_timestamp_cannot_become_the_earliest_vote() {
         atom_of(&links).expect("atom").votes,
         vec![Vote {
             did: ALICE.into(),
-            at: T1.into()
+            at: T1.into(),
+            voter: None,
         }],
         "a vote that cannot be placed in time is dropped, not sorted first"
     );
@@ -100,6 +103,7 @@ fn vouched(uri: &str, votes: &[(&str, &str)]) -> VouchedAtom {
         .map(|(did, at)| Vote {
             did: (*did).to_string(),
             at: (*at).to_string(),
+            voter: None,
         })
         .collect();
     VouchedAtom {

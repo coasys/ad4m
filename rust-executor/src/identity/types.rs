@@ -61,6 +61,10 @@ pub struct IdentityStatus {
     /// The seq of the event that revoked the device key, if one did.
     #[ts(type = "number | null")]
     pub revoked: Option<u64>,
+    /// The seq of the `unlink` that ended the device key, if one did (the device's own
+    /// `identity.unlinkSelf` or the person's master key): a dead key, like a revoked one.
+    #[ts(type = "number | null")]
+    pub unlinked: Option<u64>,
     /// The last head of the log the cache accepted.
     pub head: Option<SignedHead>,
     /// The first fork the cache recorded for the log.
@@ -291,7 +295,7 @@ pub struct OfferListing {
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimOfferParams {
-    /// The offer string (`coasys:offer:1:…`) or the offer link (`https://id.coasys.org/o#…`).
+    /// The offer string (`coasys:offer:1:…`) or the offer link (`https://coasys.id/o#…`).
     pub offer: String,
     /// A name for this device the holder sees on the confirm card (at most 64 characters).
     #[ts(optional)]
@@ -364,6 +368,8 @@ pub struct DeviceView {
     pub added_seq: u64,
     #[ts(type = "number | null")]
     pub revoked_seq: Option<u64>,
+    #[ts(type = "number | null")]
+    pub unlinked_seq: Option<u64>,
     /// The key is this agent's device key.
     pub this_device: bool,
 }

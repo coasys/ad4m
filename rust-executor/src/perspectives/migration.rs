@@ -154,7 +154,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
             continue;
         }
 
-        match sparql_store.add_link(&link_expr) {
+        match sparql_store.add_link_supplied(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -315,6 +315,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "key".to_string(),
                 signature: "sig".to_string(),
+                anchor: None,
             },
             status: None,
         };
@@ -339,6 +340,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
+                anchor: None,
             },
             status: None,
         };
@@ -363,6 +365,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
+                anchor: None,
             },
             status: None,
         };
@@ -387,6 +390,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
+                anchor: None,
             },
             status: None,
         };
@@ -444,6 +448,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig1".to_string(),
                 key: "key1".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Local),
         };
@@ -459,6 +464,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig2".to_string(),
                 key: "key2".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Local),
         };
@@ -532,6 +538,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig".to_string(),
                 key: "key".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
         };
@@ -547,6 +554,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig2".to_string(),
                 key: "key2".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Shared),
         };
@@ -622,6 +630,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig".to_string(),
                 key: "key".to_string(),
+                anchor: None,
             },
             status: Some(LinkStatus::Local),
         };

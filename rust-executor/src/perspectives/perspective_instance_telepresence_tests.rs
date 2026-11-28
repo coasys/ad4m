@@ -208,8 +208,11 @@ fn signal_from(author: &str, links: &[(&str, serde_json::Value)]) -> Perspective
                         signature: String::new(),
                         valid: Some(true),
                         invalid: Some(false),
+                        anchor: None,
                     },
                     status: None,
+                    verdict: None,
+                    person: None,
                 })
                 .collect(),
         },
@@ -218,6 +221,7 @@ fn signal_from(author: &str, links: &[(&str, serde_json::Value)]) -> Perspective
             signature: String::new(),
             valid: Some(true),
             invalid: Some(false),
+            anchor: None,
         },
     }
 }

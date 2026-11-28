@@ -6,25 +6,13 @@ use super::*;
 use crate::perspectives::model_query::shape::parse_shape_from_json;
 use crate::perspectives::model_query::test_helpers::StaticShapeResolver;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{ExpressionProof, Link, LinkExpression, LinkStatus};
+use crate::types::{LinkExpression, LinkStatus};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Signed for real: the classifier counts only verified links.
 fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
-    LinkExpression {
-        author: "did:key:test123".to_string(),
-        timestamp: ts.to_string(),
-        data: Link {
-            source: source.to_string(),
-            predicate: Some(predicate.to_string()),
-            target: target.to_string(),
-        },
-        proof: ExpressionProof {
-            key: "key".to_string(),
-            signature: "sig".to_string(),
-        },
-        status: Some(LinkStatus::Shared),
-    }
+    crate::perspectives::model_query::test_helpers::signed_link(source, predicate, target, ts)
 }
 
 /// Fixture links carry no verifiable proof, so reads opt in to unverified rows.
@@ -426,7 +414,10 @@ async fn polymorphic_target_admitted_by_the_read_keeps_its_specific_class() {
     let expected = pairs(&[
         ("we://t/1", "Special"),
         ("we://t/2", "Special"),
-        ("we://t/3", "Special"),
+        // t/3's `Special` link does not verify. The classifier counts only
+        // verified links whatever `includeUnverified` says (it decides what a
+        // node *is*), so t/3 stays `Base` here.
+        ("we://t/3", "Base"),
     ]);
 
     let top = q(json!({ "include": { "items": true } }));

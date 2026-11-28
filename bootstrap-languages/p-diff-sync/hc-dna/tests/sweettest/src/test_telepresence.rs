@@ -45,6 +45,7 @@ async fn test_online_status() {
         proof: ExpressionProof {
             signature: "test_sig".to_string(),
             key: "test_key".to_string(),
+            anchor: None,
         },
     };
 
@@ -79,6 +80,7 @@ async fn test_get_online_agents_multi() {
         proof: ExpressionProof {
             signature: "alice_sig".to_string(),
             key: "alice_key".to_string(),
+            anchor: None,
         },
     };
 
@@ -89,6 +91,7 @@ async fn test_get_online_agents_multi() {
         proof: ExpressionProof {
             signature: "bob_sig".to_string(),
             key: "bob_key".to_string(),
+            anchor: None,
         },
     };
 
