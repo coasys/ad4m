@@ -662,3 +662,90 @@ async fn language_key_persisted_mapping_short_circuits_dispatch() {
         h.mock.events()
     );
 }
+
+/// Issue #1775: a managed user has a key of its own in each language, resolved in the same
+/// order as the main agent's (stored mapping, adoption of the user's installed app, fresh key)
+/// and stored under a mapping of its own; the main agent's mapping is #1099's, unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn user_keys_are_per_language_and_user_and_leave_the_main_key_alone() {
+    let h = Harness::start();
+    Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+    let main = crate::agent::AgentContext::main_agent();
+    let alice = crate::agent::AgentContext::managed("did:key:alice".into());
+    let bob = crate::agent::AgentContext::managed("did:key:bob".into());
+
+    let main_key = AgentPubKey::from_raw_32(vec![0xAB; 32]);
+    Ad4mDb::with_global_instance(|db| {
+        db.set_setting("language_agent_key:langU", &main_key.to_string())
+    })
+    .unwrap();
+
+    let k_main = h
+        .iface
+        .agent_key_for("langU", &main, "langU-x")
+        .await
+        .unwrap();
+    assert_eq!(k_main, main_key, "the main agent keeps its stored key");
+    let k_alice = h
+        .iface
+        .agent_key_for("langU", &alice, "langU-x@did:key:alice")
+        .await
+        .unwrap();
+    let k_bob = h
+        .iface
+        .agent_key_for("langU", &bob, "langU-x@did:key:bob")
+        .await
+        .unwrap();
+    assert_ne!(k_alice, main_key);
+    assert_ne!(k_bob, main_key);
+    assert_ne!(k_alice, k_bob);
+    assert_eq!(h.mock.new_sign_keypair_calls.load(Ordering::SeqCst), 2);
+
+    // Stored, per (language, user): stable, and the main mapping untouched.
+    let stored = |key: &str| Ad4mDb::with_global_instance(|db| db.get_setting(key)).unwrap();
+    assert_eq!(
+        stored("language_agent_key:langU:did:key:alice"),
+        Some(k_alice.to_string())
+    );
+    assert_eq!(
+        stored("language_agent_key:langU"),
+        Some(main_key.to_string())
+    );
+    assert_eq!(
+        h.iface
+            .agent_key_for("langU", &alice, "langU-x@did:key:alice")
+            .await
+            .unwrap(),
+        k_alice
+    );
+    // Another language: another key for the same user.
+    let k_alice_other = h
+        .iface
+        .agent_key_for("langV", &alice, "langV-x@did:key:alice")
+        .await
+        .unwrap();
+    assert_ne!(k_alice_other, k_alice);
+    assert_eq!(h.mock.new_sign_keypair_calls.load(Ordering::SeqCst), 3);
+}
+
+/// Issue #1775: a user whose app is installed but whose key was never stored (a crash between
+/// the install and the store) adopts the app's key instead of minting one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_user_key_adopts_the_users_installed_app() {
+    let h = Harness::start();
+    Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+    let carol = crate::agent::AgentContext::managed("did:key:carol".into());
+    let existing = AgentPubKey::from_raw_32(vec![0xC4; 32]);
+    h.seed_app_info("langW-x@did:key:carol", existing.clone());
+    let key = h
+        .iface
+        .agent_key_for("langW", &carol, "langW-x@did:key:carol")
+        .await
+        .unwrap();
+    assert_eq!(key, existing);
+    assert_eq!(h.mock.new_sign_keypair_calls.load(Ordering::SeqCst), 0);
+    let stored =
+        Ad4mDb::with_global_instance(|db| db.get_setting("language_agent_key:langW:did:key:carol"))
+            .unwrap();
+    assert_eq!(stored, Some(existing.to_string()));
+}
